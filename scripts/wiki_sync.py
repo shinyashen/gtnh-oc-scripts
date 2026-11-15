@@ -24,7 +24,6 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # (维基页标题, 目标组)
 PAGES = [
     ("指南:血魔法祭坛自动化", "blood-altar"),
-    ("指南:基于OC的无线电网监控", "wireless-eu-monitor"),
     ("指南:基于OC的太空电梯智能管理", "space-elevator-miner"),
     ("指南:亚稳态黑洞遏制场自动化", "blackhole-compressor"),
 ]

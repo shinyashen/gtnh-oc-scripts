@@ -1,0 +1,394 @@
+-- 样板OC工具箱 主入口(分体版)
+-- 拆分自上游单文件版(gist kAGuyAk/45f36eec,修订 c69ad0e9,VERSION 1115-62ddaa)。
+-- 与上游差异:内嵌工具字符串改为 /home/tools/ 实体文件 + /home/lib/ 公共库(require);
+-- 工具按需加载(启动只读元数据,运行时才 loadfile,首次运行后缓存常驻,工具内部状态跨菜单连续)。
+-- 菜单/CLI 用法与上游一致:toolbox / list / about / diag / <工具id> [参数]。
+local component = require("component")
+local fs = require("filesystem")
+local term = require("term")
+local event = require("event")
+local ui = require("toolbox_ui")
+local ctxlib = require("toolbox_ctx")
+
+local TOOL_DIR = "/home/tools"
+local VERSION = "1115-62ddaa+split.1"
+
+-- 重新探测分辨率(监控工具会临时改分辨率,退出后菜单要跟随)
+local function probeSize()
+    local gpu = component.gpu
+    if gpu then
+        local ok, gw, gh = pcall(function() return gpu.getResolution() end)
+        if ok and gw then return gw, gh end
+    end
+    return ui.W, ui.H
+end
+
+-- ==== 工具扫描(元数据)与按需加载 ====
+local loadedModules = {}   -- path → 已加载模块(首次运行后缓存,保持工具内部状态连续)
+
+local function loadMetaList()
+    local list, bad = {}, {}
+    if not fs.isDirectory(TOOL_DIR) then
+        return list, bad, "目录不存在：" .. TOOL_DIR
+    end
+    for file in fs.list(TOOL_DIR) do
+        local name = tostring(file)
+        if name ~= "." and name ~= ".." and name:sub(1, 1) ~= "_" and name:sub(-4) == ".lua" then
+            local path = TOOL_DIR .. "/" .. name
+            local ok, mod = pcall(function()
+                local chunk = loadfile(path)
+                if not chunk then return nil end
+                return chunk()
+            end)
+            if ok and type(mod) == "table" and type(mod.run) == "function" then
+                local id = mod.id or name:sub(1, -5)
+                list[#list + 1] = {
+                    _file = name,
+                    path = path,
+                    id = id,
+                    name = mod.name or id,
+                    group = mod.group or "其他",
+                    order = tonumber(mod.order) or 100,
+                    desc = mod.desc,
+                }
+            else
+                bad[#bad + 1] = { file = name, err = tostring(mod) }
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.group ~= b.group then return a.group < b.group end
+        if a.order ~= b.order then return a.order < b.order end
+        return a.name < b.name
+    end)
+    return list, bad
+end
+
+-- 真正加载工具模块(缓存常驻;与上游"模块启动即载入并常驻"的运行期行为一致)
+local function getTool(t)
+    if loadedModules[t.path] then return loadedModules[t.path] end
+    local ok, mod = pcall(function()
+        local chunk = loadfile(t.path)
+        if not chunk then return nil end
+        return chunk()
+    end)
+    if ok and type(mod) == "table" and type(mod.run) == "function" then
+        mod._file = t._file
+        loadedModules[t.path] = mod
+        return mod
+    end
+    return nil, ok and "工具没有 run() 入口" or tostring(mod)
+end
+
+local function resetToolCache()
+    loadedModules = {}
+end
+
+-- ==== 主菜单 ====
+local function drawMenu(tools, bad, sel, scroll, status)
+    local W, H = ui.W, ui.H
+    term.setCursorBlink(false)
+    ui.clearHits()
+    term.clear()
+    ui.resetColorCache()
+    ui.useBg("canvas")
+    local total = tostring(#tools) .. " 个工具"
+    ui.put(1, 1, "  工具箱", "accent", "canvas")
+    ui.put(1 + ui.ulen("  工具箱") + 1, 1, "v" .. VERSION, "muted", "canvas")
+    ui.put(W - ui.ulen(total), 1, total, "muted", "canvas")
+    ui.put(1, 2, string.rep("─", W), "border", "canvas")
+    local top = 4
+    local bottom = H - 3
+    local gapX = 2
+    local cw = math.floor((W - gapX * (2 + 1)) / 2)
+    if cw < 16 then cw = 16 end
+    local CARD_H = 5
+    local stepY = CARD_H + 1
+    local rowsVisible = math.max(1, math.floor((bottom - top + 1) / stepY))
+    if #tools == 0 then
+        ui.put(2, top, "一个工具都没有", "warn", "canvas")
+        ui.put(2, top + 1, "把 .lua 工具文件放进 " .. TOOL_DIR .. "/", "muted", "canvas")
+        ui.put(2, top + 2, "公共库放 /home/lib/（对照组内 README 部署）", "muted", "canvas")
+    else
+        for i, t in ipairs(tools) do
+            local slot = i - 1 - scroll * 2
+            local row = math.floor(slot / 2)
+            local col = slot % 2
+            if row >= 0 and row < rowsVisible then
+                local x = 1 + gapX + col * (cw + gapX)
+                local y = top + row * stepY
+                ui.drawCard(x, y, cw, CARD_H, t, i == sel)
+                ui.addHit({
+                    x1 = x, x2 = x + cw - 1,
+                    y1 = y, y2 = y + CARD_H - 1,
+                    action = { kind = "tool", idx = i },
+                })
+            end
+        end
+    end
+    if #bad and #bad > 0 then
+        ui.put(1, H - 2, ui.fit(string.format("  !! %d 个工具加载失败：%s", #bad, bad[1].file), W),
+            "error", "canvas")
+    elseif status and status ~= "" then
+        ui.put(1, H - 2, "  " .. status, "warn", "canvas")
+    else
+        ui.put(1, H - 2, string.rep("─", W), "border", "canvas")
+    end
+    local bx = 1
+    local function button(label, act, fgRole)
+        local txt = "[ " .. label .. " ]"
+        ui.put(bx, H - 1, txt, fgRole or "accent", "surface")
+        ui.addHit({ x1 = bx, x2 = bx + ui.ulen(txt) - 1, y1 = H - 1, y2 = H - 1, action = act })
+        bx = bx + ui.ulen(txt) + 1
+    end
+    button("运行", { kind = "run" })
+    button("重扫", { kind = "rescan" })
+    button("退出", { kind = "quit" }, "muted")
+    ui.put(bx + 1, H - 1, "↑↓←→ 选择   回车运行   也可直接点卡片", "muted", "canvas")
+    term.setCursor(1, H - 1)
+end
+
+local function menuHeight(tools)
+    local h2, lastG = 0, nil
+    for i3 = 1, #tools do
+        if tools[i3].group ~= lastG then
+            lastG = tools[i3].group
+            h2 = h2 + 1
+        end
+        h2 = h2 + 1
+    end
+    return h2
+end
+
+local function runMenu(tools, bad)
+    local sel, scroll = 1, 0
+    local status = ""
+    local function runOne(t)
+        term.setCursorBlink(false)
+        term.clear()
+        term.setCursor(1, 1)
+        local mod, loadErr = getTool(t)
+        local ctx = ctxlib.makeCtx()
+        local ok, err
+        if not mod then
+            err = loadErr
+        else
+            ok, err = pcall(mod.run, ctx, {})
+        end
+        if not ok then
+            term.setCursor(1, ui.H)
+            term.write(ui.fit("!! 工具出错：" .. tostring(err), ui.W))
+            term.setCursor(1, ui.H)
+            term.write(ui.fit("[按任意键返回菜单]", ui.W))
+            ui.waitInput()
+        elseif not ctx.hadSelect then
+            term.setCursor(1, ui.H)
+            term.write(ui.fit("[按任意键返回菜单]", ui.W))
+            ui.waitInput()
+        end
+    end
+    while true do
+        -- 每轮重新探测分辨率,监控等工具退出后菜单尺寸能跟上
+        ui.W, ui.H = probeSize()
+        local top, bottom = 4, ui.H - 3
+        local CARD_H = 5
+        local stepY = CARD_H + 1
+        local rowsVisible = math.max(1, math.floor((bottom - top + 1) / stepY))
+        local selRow = math.floor((sel - 1) / 2)
+        if selRow < scroll then scroll = selRow end
+        if selRow >= scroll + rowsVisible then scroll = selRow - rowsVisible + 1 end
+        if scroll < 0 then scroll = 0 end
+        drawMenu(tools, bad, sel, scroll, status)
+        status = ""
+        local ev, a, b = ui.waitInput()
+        if ev == "touch" then
+            local act = ui.hitAt(a, b)
+            if act then
+                if act.kind == "tool" then
+                    if act.idx == sel then
+                        local t = tools[sel]
+                        if t then runOne(t) end
+                    else
+                        sel = act.idx
+                    end
+                elseif act.kind == "run" then
+                    local t = tools[sel]
+                    if t then runOne(t) end
+                elseif act.kind == "rescan" then
+                    resetToolCache()
+                    tools, bad = loadMetaList()
+                    if sel > #tools then sel = math.max(1, #tools) end
+                    status = string.format("已重扫：%d 个工具", #tools)
+                elseif act.kind == "quit" then
+                    term.clear()
+                    term.setCursor(1, 1)
+                    return
+                end
+            end
+        elseif ev == "key_down" then
+            local ch, code = a, b
+            if code == 200 then
+                if sel - 2 >= 1 then sel = sel - 2 end
+            elseif code == 208 then
+                if sel + 2 <= #tools then sel = sel + 2 end
+            elseif code == 203 then
+                if (sel - 1) % 2 > 0 then sel = sel - 1 end
+            elseif code == 205 then
+                if (sel - 1) % 2 < 1 and sel < #tools then sel = sel + 1 end
+            elseif code == 28 then
+                local t = tools[sel]
+                if t then runOne(t) end
+            elseif ch == 113 or ch == 81 then
+                term.clear()
+                term.setCursor(1, 1)
+                return
+            elseif ch and ch >= 49 and ch <= 57 then
+                local want = tonumber(string.char(ch))
+                if want and want <= #tools then sel = want end
+            end
+        end
+    end
+end
+
+local function showAbout(tools, bad)
+    print("工具箱 " .. VERSION)
+    print("")
+    print("工具目录       : " .. TOOL_DIR)
+    print(string.format("实际加载工具   : %d 个", #tools))
+    for _, t in ipairs(tools) do
+        print(string.format("   %-18s %s", t.id, t.name))
+    end
+    if #bad > 0 then
+        print("")
+        print("加载失败：")
+        for _, b in ipairs(bad) do print("   " .. b.file .. " —— " .. b.err) end
+    end
+    print("")
+    print("分体安装：主程序 /home/bin/toolbox   公共库 /home/lib/   工具 " .. TOOL_DIR)
+end
+
+local function runDiag()
+    term.setCursorBlink(true)
+    term.clear()
+    term.setCursor(1, 1)
+    print("事件诊断")
+    print("----------------------------------------")
+    print("现在按方向键、回车，或点屏幕，下面会实时显示收到的事件。")
+    print("按 Q 退出。")
+    print("如果这里什么都没出现，说明按键事件根本没到这台电脑：")
+    print("  检查键盘是不是贴着屏幕、键盘有没有插好。")
+    print("----------------------------------------")
+    local n = 0
+    while true do
+        local e = { event.pull() }
+        local name = tostring(e[1])
+        n = n + 1
+        if name == "key_down" then
+            local ch, code = e[3], e[4]
+            local chs = "无"
+            if ch and ch >= 32 and ch < 127 then chs = string.char(ch) end
+            print(string.format("#%-3d key_down   字符=%s  键码=%s", n, chs, tostring(code)))
+            if ch == 113 or ch == 81 then break end
+        elseif name == "touch" then
+            print(string.format("#%-3d touch      列=%s  行=%s", n, tostring(e[3]), tostring(e[4])))
+        elseif name ~= "timer" then
+            print(string.format("#%-3d %s", n, name))
+        else
+            n = n - 1
+        end
+        if n > 300 then
+            print("事件太多，先停下。")
+            break
+        end
+    end
+    term.setCursorBlink(true)
+    print("")
+    print("诊断结束。")
+end
+
+local function printList(tools, bad)
+    print("工具箱 v" .. VERSION .. " —— 工具目录 " .. TOOL_DIR)
+    print("")
+    if #tools == 0 then
+        print("（没有工具）")
+    else
+        local lastGroup = nil
+        for _, t in ipairs(tools) do
+            if t.group ~= lastGroup then
+                lastGroup = t.group
+                print("[" .. t.group .. "]")
+            end
+            print(string.format("  %-16s %s", t.id, t.name))
+            if t.desc then
+                print("      " .. t.desc)
+            end
+        end
+    end
+    if #bad and #bad > 0 then
+        print("")
+        print("以下工具加载失败：")
+        for _, b in ipairs(bad) do
+            print("  " .. b.file .. " —— " .. b.err)
+        end
+    end
+end
+
+local argv = { ... }
+local cmd = argv[1]
+local tools, bad, dirErr = loadMetaList()
+if cmd == "diag" then
+    runDiag()
+    return
+end
+if cmd == "about" or cmd == "version" or cmd == "-v" then
+    showAbout(tools, bad)
+    return
+end
+if cmd == "list" or cmd == "-l" then
+    printList(tools, bad)
+    return
+end
+if cmd and cmd ~= "" then
+    local target = nil
+    for _, t in ipairs(tools) do
+        if t.id == cmd then target = t break end
+    end
+    if not target then
+        print("没有这个工具：" .. cmd)
+        print("")
+        printList(tools, bad)
+        return
+    end
+    local args = {}
+    for i2 = 2, #argv do args[#args + 1] = argv[i2] end
+    local ctx = ctxlib.cliCtx()
+    local mod, loadErr = getTool(target)
+    if not mod then
+        print("")
+        print("!! 工具加载失败：" .. tostring(loadErr))
+        return
+    end
+    local ok, err = pcall(mod.run, ctx, args)
+    if not ok then
+        print("")
+        print("!! 工具出错：" .. tostring(err))
+    end
+    return
+end
+if not component.isAvailable("gpu") then
+    if dirErr then print(dirErr) end
+    printList(tools, bad)
+    print("")
+    print("用法： toolbox               进菜单（需要屏幕）")
+    print("       toolbox about         看版本、实际装了哪些工具")
+    print("       toolbox diag          按键/鼠标事件诊断（按了没反应时用）")
+    print("       toolbox list          列出工具")
+    print("       toolbox <工具id> [参数] 直接运行")
+    return
+end
+if dirErr then
+    print(dirErr)
+    print("先建目录： mkdir " .. TOOL_DIR)
+    return
+end
+runMenu(tools, bad)

@@ -1,0 +1,2736 @@
+local component = require("component")
+local fs = require("filesystem")
+local term = require("term")
+local event = require("event")
+local TOOL_DIR = "/home/tools"
+local VERSION = "1115-62ddaa"
+local W, H = 80, 25
+local gpu = component.gpu
+if gpu then
+    local ok, gw, gh = pcall(function() return gpu.getResolution() end)
+    if ok and gw then W, H = gw, gh end
+end
+local DEPTH = 8
+local gpuProbe = component.gpu
+if gpuProbe then
+    local okd, md = pcall(function() return gpuProbe.maxDepth() end)
+    if okd and md then
+        DEPTH = md
+        pcall(function()
+            if md >= 8 then gpuProbe.setDepth(8) else gpuProbe.setDepth(md) end
+        end)
+    end
+end
+local THEME = {
+    canvas   = 0x05080d,   -- 接近纯黑，避免整屏发暗
+    surface  = 0x141a24,   -- 卡片底
+    panel    = 0x0d121a,
+    border   = 0x33415c,   -- 卡片边框
+    borderOn = 0x6ea8ff,   -- 选中的卡片边框
+    text     = 0xffffff,
+    muted    = 0x9fb0c8,
+    accent   = 0x7fc4ff,
+    selected = 0x1d3a5f,   -- 选中卡片底
+    warn     = 0xfacc15,
+    error    = 0xfb7185,
+    ok       = 0x4ade80,
+}
+if DEPTH < 8 then
+    THEME = {
+        canvas   = 0,
+        surface  = 8,
+        panel    = 0,
+        border   = 8,
+        borderOn = 11,
+        text     = 15,
+        muted    = 7,
+        accent   = 11,
+        selected = 8,
+        warn     = 14,
+        error    = 12,
+        ok       = 10,
+    }
+end
+local function color(role, fallback)
+    if type(role) == "number" then return role end
+    return THEME[role] or THEME[fallback or "text"]
+end
+local lastFg, lastBg
+local function useFg(role)
+    if not gpu then return end
+    local c = color(role, "text")
+    if lastFg ~= c then
+        pcall(gpu.setForeground, c)
+        lastFg = c
+    end
+end
+local function useBg(role)
+    if not gpu then return end
+    local c = color(role, "canvas")
+    if lastBg ~= c then
+        pcall(gpu.setBackground, c)
+        lastBg = c
+    end
+end
+local function fit(s, width)
+    s = tostring(s or "")
+    if width <= 0 then return "" end
+    local ok, w = pcall(function() return unicode.wlen(s) end)
+    if ok and w and w > width then
+        local ok2, r = pcall(function() return unicode.wtrunc(s, width) end)
+        if ok2 and r then return r end
+        return s:sub(1, width)
+    elseif not ok and #s > width then
+        return s:sub(1, width)
+    end
+    return s
+end
+local function ulen(s)
+    s = tostring(s or "")
+    local ok, n = pcall(function() return unicode.wlen(s) end)
+    return (ok and n) or #s
+end
+local function usub(str, a, b)
+    str = tostring(str or "")
+    local ok, r = pcall(function() return unicode.sub(str, a, b) end)
+    return (ok and r) or str:sub(a, b)
+end
+local function wrapText(text, width, maxLines)
+    text = tostring(text or "")
+    local out, cur = {}, ""
+    if width <= 0 then return out end
+    local n = ulen(text)
+    for i2 = 1, n do
+        local ch = usub(text, i2, i2)
+        if ch == "\n" then
+            out[#out + 1] = cur
+            cur = ""
+        else
+            local try = cur .. ch
+            if ulen(try) > width then
+                out[#out + 1] = cur
+                cur = ch
+            else
+                cur = try
+            end
+        end
+        if maxLines and #out >= maxLines then return out end
+    end
+    if cur ~= "" and (not maxLines or #out < maxLines) then out[#out + 1] = cur end
+    return out
+end
+local function waitInput()
+    while true do
+        local e = { event.pull() }     -- 不带过滤器、不带超时：纯阻塞，最稳
+        local name = e[1]
+        if name == "key_down" then
+            return "key_down", e[3], e[4]
+        elseif name == "touch" then
+            return "touch", e[3], e[4]
+        end
+    end
+end
+local function padRight(s, width)
+    s = tostring(s or "")
+    local ok, w = pcall(function() return unicode.wlen(s) end)
+    w = (ok and w) or #s
+    local pad = width - w
+    if pad < 1 then pad = 1 end
+    return s .. string.rep(" ", pad)
+end
+-- ==== EMBEDDED-BEGIN ====
+local EMBEDDED = {
+    ["/home/tools/pattern-merge.lua"] = [====[
+local component = require("component")
+local fs = require("filesystem")
+local M = {
+    id = "pattern-merge",
+    name = "样板合并",
+    group = "AE2 样板",
+    order = 20,
+    desc = "把接口里所有样板合成一个",
+}
+local function hex(s)
+    if not s then return nil end
+    return (s:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
+end
+local function tagStr(t)
+    if t == nil then return nil end
+    if type(t) == "string" then return t end
+    if type(t) == "table" then
+        local o = {}
+        for i = 1, #t do o[i] = string.char(tonumber(t[i]) % 256) end
+        return table.concat(o)
+    end
+    return nil
+end
+local function sortedKeys(t)
+    local k = {}
+    if type(t) ~= "table" then return k end
+    for n in pairs(t) do
+        if type(n) == "number" then k[#k + 1] = n end
+    end
+    table.sort(k)
+    return k
+end
+local function numStr(v)
+    local n = tonumber(v) or 1
+    if n == math.floor(n) then return string.format("%d", math.floor(n)) end
+    return tostring(n)
+end
+local function isFluid(it)
+    if it.isFluid == true then return true end
+    if it.amount ~= nil then return true end
+    local n = tostring(it.name or ""):lower()
+    if n:find("molten", 1, true) then return true end
+    if n:sub(1, 6) == "fluid." then return true end
+    return false
+end
+local function brief(it, maxLen)
+    local s = tostring(it.label or it.name or "?")
+    maxLen = maxLen or 8
+    local ok, n = pcall(utf8.len, s)
+    if ok and n and n > maxLen then
+        local pos = utf8.offset(s, maxLen + 1)
+        if pos then s = s:sub(1, pos - 1) .. ".." end
+    elseif not ok and #s > maxLen then
+        s = s:sub(1, maxLen) .. ".."
+    end
+    return s
+end
+local function findIface()
+    for addr in component.list("fluid_interface") do
+        return component.proxy(addr), "fluid_interface"
+    end
+    for addr in component.list("me_interface") do
+        return component.proxy(addr), "me_interface"
+    end
+    return nil, nil
+end
+local function findDb()
+    for addr in component.list("database") do
+        return component.proxy(addr)
+    end
+    return nil
+end
+local function listPatterns(iface)
+    local out = {}
+    for slot = 1, 36 do
+        local ok, p = pcall(iface.getInterfacePattern, slot)
+        if ok and p then out[#out + 1] = { slot = slot, pat = p } end
+    end
+    return out
+end
+local function collectSide(list)
+    local out = {}
+    for _, k in ipairs(sortedKeys(list)) do
+        local it = list[k]
+        if type(it) == "table" and next(it) ~= nil then
+            local t = tagStr(it.tag)
+            out[#out + 1] = {
+                name = tostring(it.name or ""),
+                damage = tonumber(it.damage) or 0,
+                size = tonumber(it.size or it.amount) or 1,
+                fluid = isFluid(it),
+                tag = (t and #t > 0) and t or nil,
+                label = tostring(it.label or ""),
+                hasTag = it.hasTag == true,
+            }
+        end
+    end
+    return out
+end
+local function keyOf(e)
+    return table.concat({
+        e.name,
+        tostring(e.damage or 0),
+        e.tag and hex(e.tag) or "",
+        e.fluid and "F" or "I",
+    }, "|")
+end
+local function mergeList(parts)
+    local map, order = {}, {}
+    for _, part in ipairs(parts) do
+        for _, e in ipairs(part) do
+            local k = keyOf(e)
+            if not map[k] then
+                map[k] = {
+                    name = e.name, damage = e.damage, size = e.size,
+                    fluid = e.fluid, tag = e.tag, label = e.label, hasTag = e.hasTag,
+                    from = { 1 },
+                }
+                order[#order + 1] = k
+            else
+                map[k].size = map[k].size + e.size
+            end
+        end
+    end
+    local out = {}
+    for _, k in ipairs(order) do out[#out + 1] = map[k] end
+    return out
+end
+local function countTagged(list)
+    local n = 0
+    for _, e in ipairs(list) do
+        if e.tag or e.nbt then n = n + 1 end
+    end
+    return n
+end
+local function writePattern(ctx, iface, slot, outs, ins)
+    local unknown = 0
+    for _, list in ipairs({ outs, ins }) do
+        for _, e in ipairs(list) do
+            if e.hasTag and not e.tag and not e.nbt then unknown = unknown + 1 end
+        end
+    end
+    if unknown > 0 then
+        return false, string.format("有 %d 项带 NBT 读不到内容，请先给它们设个名字", unknown)
+    end
+    local db, dbSlot = nil, 1
+    local function ensureDb()
+        if not db then db = findDb() end
+        return db
+    end
+    local function put(kind, list)
+        for idx, e in ipairs(list) do
+            local ok
+            if e.nbt then
+                local d = ensureDb()
+                if not d then
+                    return false, "有按名字重建的项，但找不到数据库升级（要插电脑机箱）"
+                end
+                d.set(dbSlot, e.name, e.damage or 0, e.nbt)
+                if d.get and d.get(dbSlot) == nil then
+                    return false, string.format("数据库第 %d 槽没写进去", dbSlot)
+                end
+                if kind == "out" then
+                    ok = iface.setInterfacePatternOutput(slot, idx, d.address, dbSlot, e.size or 1)
+                else
+                    ok = iface.setInterfacePatternInput(slot, idx, d.address, dbSlot, e.size or 1)
+                end
+                dbSlot = dbSlot + 1
+            else
+                local d
+                if e.fluid then
+                    d = { name = e.name, size = e.size }
+                else
+                    d = { name = e.name, size = e.size }
+                    if e.damage ~= 0 then d.damage = e.damage end
+                end
+                if e.tag then d.tag = e.tag end
+                local t = e.fluid and "fluid" or "item"
+                if kind == "out" then
+                    ok = iface.setInterfacePatternOutput(slot, idx, d, t)
+                else
+                    ok = iface.setInterfacePatternInput(slot, idx, d, t)
+                end
+            end
+            if not ok then
+                return false, string.format("第 %d 项（%s）写入失败", idx,
+                    e.label ~= "" and e.label or e.name)
+            end
+            os.sleep(0)
+        end
+        return true
+    end
+    local ok1, err1 = put("out", outs)
+    if not ok1 then return false, err1 end
+    local ok2, err2 = put("in", ins)
+    if not ok2 then return false, err2 end
+    local chk = iface.getInterfacePattern(slot)
+    if not chk then return false, "写完了但回读不到样板" end
+    local nIn, nOut = 0, 0
+    if chk.inputs then for _ in pairs(chk.inputs) do nIn = nIn + 1 end end
+    if chk.outputs then for _ in pairs(chk.outputs) do nOut = nOut + 1 end end
+    if nOut < #outs or nIn < #ins then
+        return false, string.format("回读数量对不上：写进 输出%d/输入%d，读回 输出%d/输入%d",
+            #outs, #ins, nOut, nIn)
+    end
+    return true
+end
+function M.run(ctx, args)
+    args = args or {}
+    local dry, toSlot = false, nil
+    for _, a in ipairs(args) do
+        local s = tostring(a)
+        if s == "--dry" then
+            dry = true
+        else
+            local n = s:match("^%-%-to=(%d+)$")
+            if n then toSlot = tonumber(n) end
+        end
+    end
+    local iface, ifaceKind = findIface()
+    if not iface then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "找不到ME接口",
+                footer = "检查适配器是否紧贴ME接口",
+            })
+        else
+            ctx.write("找不到ME接口")
+        end
+        return false
+    end
+    local found = listPatterns(iface)
+    if #found == 0 then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "没有找到任何样板",
+                footer = "在ME接口中放入样板",
+            })
+        else
+            ctx.write("没有找到任何样板")
+        end
+        return false
+    end
+    local allOuts, allIns = {}, {}
+    for _, it in ipairs(found) do
+        allOuts[#allOuts + 1] = collectSide(it.pat.outputs)
+        allIns[#allIns + 1] = collectSide(it.pat.inputs)
+    end
+    local mergedOuts = mergeList(allOuts)
+    local mergedIns = mergeList(allIns)
+    local lines = {}
+    lines[#lines + 1] = string.format("找到 %d 个样板，合并后：", #found)
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format("输出 %d 项", #mergedOuts)
+    for _, e in ipairs(mergedOuts) do
+        lines[#lines + 1] = string.format("   %s ×%s", brief(e, 12), numStr(e.size))
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format("输入 %d 项", #mergedIns)
+    for _, e in ipairs(mergedIns) do
+        lines[#lines + 1] = string.format("   %s ×%s", brief(e, 12), numStr(e.size))
+    end
+    local nTag = countTagged(mergedOuts) + countTagged(mergedIns)
+    if nTag > 0 then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = string.format("注意：有 %d 项带 NBT（改名/附魔等）", nTag)
+        lines[#lines + 1] = "  需要配置里 allowItemStackNBTTags = true 才能保住"
+        lines[#lines + 1] = "  没开的话这些物品会变回原名"
+    end
+    if dry then
+        for _, l in ipairs(lines) do ctx.write(l) end
+        return true
+    end
+    if ctx.select then
+        local items = {}
+        for _, l in ipairs(lines) do
+            items[#items + 1] = { label = l, value = "__info__" }
+        end
+        table.insert(items, 1, { label = "▶ 开始合并" .. (toSlot and ("（写到槽 " .. toSlot .. "）") or ""), value = "__go__" })
+        table.insert(items, 2, { label = "取消", value = "__cancel__" })
+        local pick
+        repeat
+            pick = ctx.select(items, {
+                title = "样板合并 · 第 1 步：确认要合并的内容",
+                footer = "点「▶ 开始合并」继续   ↑↓ 移动   Q 返回菜单",
+            })
+            if pick == nil then return true end
+        until pick ~= "__info__"
+        if pick ~= "__go__" then return true end
+    else
+        for _, l in ipairs(lines) do ctx.write(l) end
+    end
+    if ctx.select and ctx.prompt then
+        while true do
+            local items2 = {
+                { label = "▶ 名字都不用改，继续", value = "__next__" },
+            }
+            for _, e in ipairs(mergedOuts) do
+                items2[#items2 + 1] = {
+                    label = "输出  " .. brief(e, 10) .. "  ×" .. numStr(e.size),
+                    desc = "显示名：" .. (e.label ~= "" and e.label or "(无)"),
+                    value = { item = e, side = "输出" },
+                }
+            end
+            for _, e in ipairs(mergedIns) do
+                items2[#items2 + 1] = {
+                    label = "输入  " .. brief(e, 10) .. "  ×" .. numStr(e.size),
+                    desc = "显示名：" .. (e.label ~= "" and e.label or "(无)"),
+                    value = { item = e, side = "输入" },
+                }
+            end
+            local pick = ctx.select(items2, {
+                title = "样板合并 · 第 2 步：要改哪个物品的显示名？（不想改就直接继续）",
+                footer = "点物品改名   点第一项继续    ↑↓ 移动   Q 取消",
+            })
+            if pick == nil then return true end
+            if pick == "__next__" then break end
+            local e = pick.item
+            local cur = (e.label ~= "" and e.label) or nil
+            local nm = ctx.prompt(
+                string.format("%s「%s」的新显示名", pick.side, e.label ~= "" and e.label or e.name),
+                cur,
+                "直接打字（只支持英文数字）  Enter 确定  Q 取消  Backspace 删除")
+            if nm and nm ~= "" then
+                local esc = nm:gsub("\\", "\\\\"):gsub('"', '\\"')
+                e.nbt = '{display:{Name:"' .. esc .. '"}}'
+                e.label = nm
+            end
+        end
+    end
+    if not toSlot then
+        if ctx.select then
+            local slots = {}
+            for slot = 1, 36 do
+                local ok, p = pcall(iface.getInterfacePattern, slot)
+                if ok and p ~= nil then
+                    slots[#slots + 1] = {
+                        label = string.format("槽 %d", slot),
+                        desc = "（有样板，合并后内容会被覆盖）",
+                        value = slot,
+                    }
+                end
+            end
+            if #slots == 0 then
+                return false, "一个可写的槽都没有（空槽要先塞占位样板）"
+            end
+            toSlot = ctx.select(slots, {
+                title = "样板合并 · 第 2 步：合并结果写到哪个槽",
+                footer = "只能选已有样板的槽（空槽要先塞占位样板）   Q 取消",
+            })
+            if not toSlot then return true end
+        else
+            local ans = ctx.ask("写到哪个槽（数字）> ", "")
+            toSlot = tonumber(ans or "")
+            if not toSlot then return false end
+        end
+    end
+    local ok, err = writePattern(ctx, iface, toSlot, mergedOuts, mergedIns)
+    if ctx.select then
+        if ok then
+            ctx.select({ { label = "好的", value = 1 } }, {
+                title = string.format("合并完成：已写入槽 %d", toSlot),
+                footer = string.format("输出 %d 项 / 输入 %d 项   去游戏里点开看看吧", #mergedOuts, #mergedIns),
+            })
+        else
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "合并失败",
+                footer = tostring(err),
+            })
+        end
+    else
+        ctx.write(ok and "合并完成" or ("失败：" .. tostring(err)))
+    end
+    return ok
+end
+return M
+]====],
+    ["/home/tools/pattern-to-fluid.lua"] = [====[
+local component = require("component")
+local M = {
+    id = "pattern-to-fluid",
+    name = "高炉转流体",
+    group = "AE2 样板",
+    order = 30,
+    desc = "把输出的锭换成熔融流体\n1 锭 = 144 mB",
+}
+local MB_PER_INGOT = 144
+local FLUID_PREFIX = "molten."
+local FLUID_PREFIX_ALT = "gregtech:molten."
+local BEC_MAP = {
+    ["entangled_neutronium"] = "molten.neutronium",
+    ["entangled_cosmicneutronium"] = "molten.cosmicneutronium",
+    ["entangled_bedrockium"] = "molten.bedrockium",
+    ["entangled_chromaticglass"] = "molten.chromaticglass",
+    ["entangled_celestialtungsten"] = "molten.celestialtungsten",
+    ["entangled_infinity"] = "molten.infinity",
+    ["entangled_hypogen"] = "molten.hypogen",
+    ["entangled_transcendentmetal"] = "molten.transcendentmetal",
+    ["entangled_spacetime"] = "molten.spacetime",
+    ["entangled_dimshiftedsuperfluid"] = "dimensionallyshiftedsuperfluid",
+    ["entangled_phononmedium"] = "phononmedium",
+    ["entangled_quarkgluonplasma"] = "quarkgluonplasma",
+    ["entangled_time"] = "temporalfluid",
+    ["entangled_space"] = "spatialfluid",
+    ["entangled_cosmicsolder"] = "boundlesscosmicsolder",
+    ["entangled_mhdcsm"] = "magnetohydrodynamicallyconstrainedstarmatter",
+    ["entangled_magmatter"] = "molten.magmatter",
+    ["entangled_universium"] = "molten.universium",
+    ["entangled_eternity"] = "molten.eternity",
+}
+local function convertEntangled(list)
+    local out, log = {}, {}
+    for _, e in ipairs(list) do
+        local key = tostring(e.name or "")
+        local fname = BEC_MAP[key]
+        if not fname then
+            local short = key:match("^[^:]+:(.+)$")
+            if short then fname = BEC_MAP[short] end
+        end
+        if fname and not e.fluid then
+            local ne = {
+                name = fname,
+                damage = 0,
+                size = e.size,
+                fluid = true,
+                label = "",
+                hasTag = false,
+            }
+            out[#out + 1] = ne
+            log[#log + 1] = { kind = "bec", from = e, to = ne }
+        else
+            out[#out + 1] = e
+        end
+    end
+    return out, log
+end
+local function hex(s)
+    if not s then return nil end
+    return (s:gsub(".", function(c) return string.format("%02x", string.byte(c)) end))
+end
+local function tagStr(t)
+    if t == nil then return nil end
+    if type(t) == "string" then return t end
+    if type(t) == "table" then
+        local o = {}
+        for i = 1, #t do o[i] = string.char(tonumber(t[i]) % 256) end
+        return table.concat(o)
+    end
+    return nil
+end
+local function sortedKeys(t)
+    local k = {}
+    if type(t) ~= "table" then return k end
+    for n in pairs(t) do
+        if type(n) == "number" then k[#k + 1] = n end
+    end
+    table.sort(k)
+    return k
+end
+local function numStr(v)
+    local n = tonumber(v) or 1
+    if n == math.floor(n) then return string.format("%d", math.floor(n)) end
+    return tostring(n)
+end
+local function isFluid(it)
+    if it.isFluid == true then return true end
+    if it.amount ~= nil then return true end
+    local n = tostring(it.name or ""):lower()
+    if n:find("molten", 1, true) then return true end
+    if n:sub(1, 6) == "fluid." then return true end
+    return false
+end
+local function brief(it, maxLen)
+    local s = tostring(it.label or "")
+    if s == "" then
+        s = tostring(it.name or "?")
+        s = s:gsub("^gregtech:", ""):gsub("^minecraft:", "")
+    end
+    maxLen = maxLen or 10
+    local ok, n = pcall(utf8.len, s)
+    if ok and n and n > maxLen then
+        local pos = utf8.offset(s, maxLen + 1)
+        if pos then s = s:sub(1, pos - 1) .. ".." end
+    elseif not ok and #s > maxLen then
+        s = s:sub(1, maxLen) .. ".."
+    end
+    return s
+end
+local function findIface()
+    for addr in component.list("fluid_interface") do
+        return component.proxy(addr), "fluid_interface"
+    end
+    for addr in component.list("me_interface") do
+        return component.proxy(addr), "me_interface"
+    end
+    return nil, nil
+end
+local function listPatterns(iface)
+    local out = {}
+    for slot = 1, 36 do
+        local ok, p = pcall(iface.getInterfacePattern, slot)
+        if ok and p then out[#out + 1] = { slot = slot, pat = p } end
+    end
+    return out
+end
+local function collectSide(list)
+    local out = {}
+    for _, k in ipairs(sortedKeys(list)) do
+        local it = list[k]
+        if type(it) == "table" and next(it) ~= nil then
+            local t = tagStr(it.tag)
+            out[#out + 1] = {
+                name = tostring(it.name or ""),
+                damage = tonumber(it.damage) or 0,
+                size = tonumber(it.size or it.amount) or 1,
+                fluid = isFluid(it),
+                tag = (t and #t > 0) and t or nil,
+                label = tostring(it.label or ""),
+                hasTag = it.hasTag == true,
+                oreDict = tostring(it.oreDict or ""),
+            }
+        end
+    end
+    return out
+end
+local function materialFromLabel(lb)
+    lb = tostring(lb or "")
+    if not lb:find("[Ii]ngot$") then return nil end
+    local mat = lb:gsub("^Hot%s+", "")
+    mat = mat:gsub("%s*[Ii]ngot$", "")
+    mat = mat:lower()
+    mat = mat:gsub("%s+", "")
+    if mat == "" then return nil end
+    return mat
+end
+local function ingotMaterial(it, labels)
+    local lb0 = tostring(it.label or "")
+    if lb0 ~= "" then
+        local m0 = materialFromLabel(lb0)
+        if m0 then return m0 end
+    end
+    if labels then
+        local key = string.format("%s:%d", tostring(it.name or ""), tonumber(it.damage) or 0)
+        local lb = labels[key]
+        if lb and lb ~= "" then
+            local m1 = materialFromLabel(lb)
+            if m1 then return m1 end
+        end
+    end
+    local od = tostring(it.oreDict or "")
+    if od ~= "" then
+        local m2 = od:match("^ingotHot(%a[%w]*)$") or od:match("^ingot(%a[%w]*)$")
+        if m2 then return m2:lower() end
+    end
+    local n = tostring(it.name or ""):lower()
+    local m3 = n:match("([%w_]+)_hot_ingot$") or n:match("([%w_]+)_ingot$")
+    if m3 then return m3 end
+    return nil
+end
+local function isIngot(e)
+    if e.fluid then return false end
+    local lb = tostring(e.label or "")
+    if lb:find("[Ii]ngot$") then return true end
+    if lb == "" then
+        local od = tostring(e.oreDict or "")
+        if od:sub(1, 5) == "ingot" then return true end
+        local n = tostring(e.name or ""):lower()
+        if n:match("_ingot$") or n:match(":ingot") then return true end
+    end
+    return false
+end
+local function fluidMaterial(fname)
+    local n = tostring(fname or ""):lower()
+    local m = n:match("molten[%._]([%w_]+)$")
+    if m then return m end
+    m = n:match("^fluid%.([%w_]+)$")
+    if m then return m end
+    return nil
+end
+local function learnLabels(iface)
+    local map = {}
+    local f = iface.getItemsInNetwork
+    if not f then return map, false end
+    local ok, list = pcall(f)
+    if not ok or type(list) ~= "table" then return map, false end
+    local n = 0
+    for _, it in ipairs(list) do
+        if type(it) == "table" and it.name then
+            local k = string.format("%s:%d", tostring(it.name), tonumber(it.damage) or 0)
+            if it.label and tostring(it.label) ~= "" and map[k] == nil then
+                map[k] = tostring(it.label)
+                n = n + 1
+            end
+        end
+    end
+    return map, n > 0
+end
+local function learnFluidNames(iface)
+    local map = {}
+    for slot = 1, 36 do
+        local ok, p = pcall(iface.getInterfacePattern, slot)
+        if ok and p then
+            for _, list in ipairs({ p.outputs, p.inputs }) do
+                for _, k in ipairs(sortedKeys(list)) do
+                    local it = list[k]
+                    if type(it) == "table" and isFluid(it) then
+                        local mat = fluidMaterial(it.name)
+                        if mat and map[mat] == nil then
+                            map[mat] = tostring(it.name)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return map
+end
+local function keyOfEntry(e)
+    return table.concat({ tostring(e.name or ""), tostring(e.damage or 0), tostring(e.size or 1) }, "|")
+end
+local function convertOutputs(outs, fluidMap, manual, known, labels)
+    local newOuts, log, skipped = {}, {}, {}
+    for _, e in ipairs(outs) do
+        if e.fluid then
+            newOuts[#newOuts + 1] = e
+            log[#log + 1] = { kind = "keepFluid", from = e, to = e }
+        elseif isIngot(e) then
+            local mat = ingotMaterial(e, labels)
+            local fname = (manual and manual[entryKey(e)])
+                or (known and known[entryKey(e)])
+                or (mat and fluidMap[mat]) or nil
+            if not fname and mat and not fluidMap[mat] then
+                fname = FLUID_PREFIX .. mat
+            end
+            if fname then
+                local n = (tonumber(e.size) or 1) * MB_PER_INGOT
+                local ne = {
+                    name = fname,
+                    damage = 0,
+                    size = n,
+                    fluid = true,
+                    label = "",
+                    hasTag = false,
+                }
+                newOuts[#newOuts + 1] = ne
+                log[#log + 1] = { kind = "converted", from = e, to = ne, mat = mat }
+            else
+                newOuts[#newOuts + 1] = e
+                skipped[#skipped + 1] = e
+                log[#log + 1] = { kind = "fail", from = e, to = e }
+            end
+        else
+            newOuts[#newOuts + 1] = e
+            log[#log + 1] = { kind = "keepOther", from = e, to = e }
+        end
+    end
+    return newOuts, log, skipped
+end
+local function dumpEntry(it)
+    if type(it) ~= "table" then return tostring(it) end
+    local ks = {}
+    for k in pairs(it) do ks[#ks + 1] = tostring(k) end
+    table.sort(ks)
+    local parts = {}
+    for _, k in ipairs(ks) do
+        local v = it[k]
+        local vs
+        if type(v) == "table" then vs = "<table>" else vs = tostring(v) end
+        parts[#parts + 1] = k .. "=" .. vs
+    end
+    return table.concat(parts, " ")
+end
+local function writeOne(iface, kind, slot, idx, e)
+    local candidates
+    if e.fluid then
+        local short = e.name
+        local long = e.name
+        if short:sub(1, 9) == "gregtech:" then
+            short = short:sub(10)
+        else
+            long = "gregtech:" .. short
+        end
+        candidates = {
+            { data = { name = short, size = e.size }, tag = "fluid", label = "size/短名" },
+            { data = { name = long, size = e.size }, tag = "fluid", label = "size/长名" },
+            { data = { name = short, amount = e.size }, tag = "fluid", label = "amount/短名" },
+            { data = { name = long, amount = e.size }, tag = "fluid", label = "amount/长名" },
+        }
+    else
+        local d = { name = e.name, size = e.size }
+        if e.damage and e.damage ~= 0 then d.damage = e.damage end
+        if e.tag then d.tag = e.tag end
+        candidates = { { data = d, tag = "item", label = "item" } }
+    end
+    local lastErr = nil
+    for _, c in ipairs(candidates) do
+        pcall(function()
+            if kind == "out" then
+                return iface.setInterfacePatternOutput(slot, idx, c.data, c.tag)
+            else
+                return iface.setInterfacePatternInput(slot, idx, c.data, c.tag)
+            end
+        end)
+        os.sleep(0.15)
+        local okR, pat = pcall(iface.getInterfacePattern, slot)
+        if okR and pat then
+            local list = (kind == "out") and pat.outputs or pat.inputs
+            local got = list and list[idx]
+            local gotName = got and tostring(got.name) or nil
+            if gotName == e.name then
+                return true, c.label
+            end
+            if gotName == tostring(c.data.name) then
+                return true, c.label
+            end
+            if gotName == nil then
+                return true, c.label .. "(未回读)"
+            end
+            lastErr = string.format("%s: 回读是 %s", c.label, gotName)
+        else
+            return true, c.label .. "(未回读)"
+        end
+    end
+    return false, lastErr or "四种写法都试过了"
+end
+local function writePattern(iface, slot, outs, ins, dry)
+    local notes = {}
+    local function put(kind, list)
+        for idx, e in ipairs(list) do
+            if dry then
+                notes[#notes + 1] = string.format("%s#%d 跳过(预览)", kind, idx)
+            else
+                local ok, how = writeOne(iface, kind, slot, idx, e)
+                if not ok then
+                    return false, string.format("%s 第 %d 项失败：%s", kind, idx, tostring(how))
+                end
+                notes[#notes + 1] = string.format("%s#%d=%s", kind, idx, tostring(how))
+            end
+            os.sleep(0)
+        end
+        return true
+    end
+    local ok1, err1 = put("in", ins)
+    if not ok1 then return false, err1 end
+    local ok2, err2 = put("out", outs)
+    if not ok2 then return false, err2 end
+    if not dry then
+        local chk = iface.getInterfacePattern(slot)
+        if chk then
+            for kind, want in pairs({ ["in"] = #ins, ["out"] = #outs }) do
+                local list = (kind == "in") and chk.inputs or chk.outputs
+                local n = 0
+                if list then for _ in pairs(list) do n = n + 1 end end
+                if n > want then
+                    notes[#notes + 1] = string.format("警告：%s 还有 %d 项多余的老条目（%d 应为 %d）",
+                        kind, n - want, n, want)
+                end
+            end
+        end
+    end
+    return true, table.concat(notes, " "), true
+end
+local function fmtEntry(e)
+    return string.format("%s ×%s", brief(e, 10), numStr(e.size))
+end
+function M.run(ctx, args)
+    args = args or {}
+    local verbose, dry = false, false
+    for _, a in ipairs(args) do
+        local t = tostring(a)
+        if t == "--verbose" or t == "-v" then verbose = true end
+        if t == "--dry" then dry = true end
+    end
+    local iface, ifaceKind = findIface()
+    if not iface then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "找不到ME接口",
+                footer = "检查适配器是否紧贴ME接口",
+            })
+        else
+            ctx.write("找不到ME接口")
+        end
+        return false
+    end
+    local found = listPatterns(iface)
+    if #found == 0 then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "没有找到任何样板", footer = "在ME接口中放入样板",
+            })
+        else
+            ctx.write("没有找到任何样板")
+        end
+        return false
+    end
+    ctx.clear()
+    ctx.write(string.format("高炉转流体 · 共 %d 个样板，逐个检查", #found))
+    ctx.write(string.rep("-", 60))
+    local fluidMap = learnFluidNames(iface)
+    local labels, hasLabels = learnLabels(iface)
+    do
+        local nl = 0
+        for _ in pairs(labels) do nl = nl + 1 end
+        ctx.write(string.format("从 ME 网络读到 %d 个物品显示名", nl))
+    end
+    local nOk, nSkip, nFail = 0, 0, 0
+    local devlog = {}
+    for _, it in ipairs(found) do
+        local outs = collectSide(it.pat.outputs)
+        local ins0 = collectSide(it.pat.inputs)
+        local ins, becLog = convertEntangled(ins0)
+        local newOuts, log, skipped = convertOutputs(outs, fluidMap, nil, nil, labels)
+        for _, r in ipairs(becLog) do log[#log + 1] = r end
+        local changed = false
+        for _, r in ipairs(log) do
+            if r.kind == "converted" or r.kind == "bec" then changed = true end
+        end
+        if not changed then
+            nSkip = nSkip + 1
+            ctx.write(string.format("槽 %d: 跳过（没认出锭）", it.slot))
+            local rawOut = it.pat.outputs
+            local shown = 0
+            for _, k in ipairs(sortedKeys(rawOut)) do
+                if shown < 3 then
+                    shown = shown + 1
+                    ctx.write("    原始输出" .. k .. ": " .. dumpEntry(rawOut[k]))
+                end
+            end
+            if shown == 0 then
+                ctx.write("    （这个样板读不到任何输出）")
+            end
+        else
+            ctx.write(string.format("槽 %d:", it.slot))
+            for _, r in ipairs(log) do
+                if r.kind == "converted" then
+                    ctx.write(string.format("   %s → %s", fmtEntry(r.from), fmtEntry(r.to)))
+                elseif r.kind == "bec" then
+                    ctx.write(string.format("   纠缠容器 %s → %s", fmtEntry(r.from), fmtEntry(r.to)))
+                elseif r.kind == "fail" then
+                    ctx.write(string.format("   !! %s 认不出流体，保持原样", fmtEntry(r.from)))
+                end
+            end
+            local ok, err = writePattern(iface, it.slot, newOuts, ins, dry)
+            if ok then
+                ctx.write("   [成功] 已写入 " .. it.slot .. " 槽")
+                nOk = nOk + 1
+            else
+                ctx.write("   [失败] " .. tostring(err))
+                nFail = nFail + 1
+            end
+            devlog[#devlog + 1] = string.format("槽%d %s", it.slot, ok and "OK" or tostring(err))
+        end
+        os.sleep(0)
+    end
+    ctx.write(string.rep("-", 60))
+    ctx.write(string.format("完成：转换成功 %d 个，无锭跳过 %d 个，失败 %d 个",
+        nOk, nSkip, nFail))
+    if nFail > 0 then
+        ctx.write("失败的样板原因如下：")
+        for _, l in ipairs(devlog) do
+            if l:find("OK") == nil then ctx.write("   " .. l) end
+        end
+    end
+    ctx.write("")
+    if ctx.select then
+        ctx.select({ { label = "好了", value = 1 } }, {
+            title = string.format("高炉转流体：成功 %d / 跳过 %d / 失败 %d", nOk, nSkip, nFail),
+            footer = "失败的会写回原样，可以再跑一次",
+        })
+    else
+        ctx.write("按任意键返回")
+    end
+    return nFail == 0
+end
+return M
+]====],
+    ["/home/tools/shield-gas.lua"] = [====[
+local component = require("component")
+local M = {
+    id = "shield-gas",
+    name = "保护气替换",
+    group = "AE2 样板",
+    order = 40,
+    desc = "给样板加保护气、换保护气、或者清掉保护气",
+}
+local GASES = {
+    { id = "oganesson", cn = "鿫", amount = 100 },
+    { id = "xenon",     cn = "氙", amount = 250 },
+    { id = "krypton",   cn = "氪", amount = 400 },
+    { id = "neon",      cn = "氖", amount = 550 },
+    { id = "radon",     cn = "氡", amount = 700 },
+    { id = "argon",     cn = "氩", amount = 850 },
+    { id = "helium",    cn = "氦", amount = 1000 },
+    { id = "nitrogen",  cn = "氮", amount = 1000 },
+}
+local BY_ID = {}
+for _, g in ipairs(GASES) do
+    BY_ID[g.id] = g
+end
+local function findIface()
+    for addr in component.list("fluid_interface") do
+        return component.proxy(addr), "fluid_interface"
+    end
+    for addr in component.list("me_interface") do
+        return component.proxy(addr), "me_interface"
+    end
+    return nil, nil
+end
+local function shortName(name)
+    local nm = tostring(name or ""):lower()
+    local s = nm:match("^[^:]+:(.+)$")
+    if s then return s end
+    return nm
+end
+local function gasOf(e)
+    return BY_ID[shortName(e.name)]
+end
+local function countInputs(p)
+    local n, maxIdx = 0, 0
+    for idx in pairs(p.inputs or {}) do
+        n = n + 1
+        if idx > maxIdx then maxIdx = idx end
+    end
+    return n, maxIdx
+end
+local function listPatterns(iface)
+    local out = {}
+    for slot = 1, 36 do
+        local ok, p = pcall(iface.getInterfacePattern, slot)
+        if ok and p then
+            out[#out + 1] = { slot = slot, pat = p }
+        end
+    end
+    return out
+end
+function M.run(ctx, args)
+    local iface, ifaceKind = findIface()
+    if not iface then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "找不到ME接口",
+                footer = "检查适配器是否紧贴方块",
+            })
+        else
+            ctx.write("找不到ME接口")
+        end
+        return false
+    end
+    local patterns = listPatterns(iface)
+    if #patterns == 0 then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "接口里没有样板", footer = "先把样板插进接口",
+            })
+        else
+            ctx.write("接口里没有样板")
+        end
+        return false
+    end
+    local items = {}
+    for _, g in ipairs(GASES) do
+        items[#items + 1] = {
+            label = g.cn .. "  " .. g.id,
+            desc = "需要 " .. g.amount,
+            value = { kind = "set", gas = g },
+        }
+    end
+    items[#items + 1] = {
+        label = "清除保护气",
+        desc = "把样板里的保护气删掉",
+        value = { kind = "clear" },
+    }
+    local pick
+    if ctx.select then
+        pick = ctx.select(items, {
+            title = string.format("保护气：选一种（接口里 %d 个样板）", #patterns),
+            footer = "点一行选中   ↑↓ 移动   Enter 确定   Q 返回",
+        })
+    else
+        for i, it in ipairs(items) do
+            ctx.write(string.format("  %d. %s  %s", i, it.label, it.desc))
+        end
+        local ans = ctx.ask("选哪个（数字）> ", "")
+        local n = tonumber(ans or "")
+        if n and items[n] then pick = items[n].value end
+    end
+    if not pick then return true end
+    local gas = pick.gas
+    local clearMode = (pick.kind == "clear")
+    ctx.clear()
+    ctx.write(clearMode and "清除保护气" or ("换成 " .. gas.cn .. " " .. gas.id))
+    ctx.write(string.rep("-", 50))
+    ctx.write(string.format("共 %d 个样板", #patterns))
+    ctx.write("")
+    local nAdd, nChange, nClear, nSkip, nFail = 0, 0, 0, 0, 0
+    for _, item in ipairs(patterns) do
+        local slot = item.slot
+        local p = item.pat
+        local nIn = countInputs(p)
+        if nIn == 0 then
+            nSkip = nSkip + 1
+        else
+            local gasIdx = nil
+            for idx, e in pairs(p.inputs) do
+                if gasOf(e) then gasIdx = idx end
+            end
+            if clearMode then
+                if gasIdx then
+                    local ok = iface.clearInterfacePatternInput(slot, gasIdx)
+                    if ok then
+                        nClear = nClear + 1
+                        ctx.write(string.format("槽 %d: 清除保护气（第 %d 项）", slot, gasIdx))
+                    else
+                        nFail = nFail + 1
+                        ctx.write(string.format("槽 %d: 清除失败", slot))
+                    end
+                else
+                    nSkip = nSkip + 1
+                end
+            else
+                if gasIdx then
+                    local ok = iface.setInterfacePatternInput(slot, gasIdx,
+                        { name = gas.id, size = gas.amount }, "fluid")
+                    if ok then
+                        nChange = nChange + 1
+                        ctx.write(string.format("槽 %d: %s → %s×%d", slot, gas.cn, gas.id, gas.amount))
+                    else
+                        nFail = nFail + 1
+                        ctx.write(string.format("槽 %d: 改失败", slot))
+                    end
+                else
+                    local _, maxIdx = countInputs(p)
+                    local ok = iface.setInterfacePatternInput(slot, maxIdx + 1,
+                        { name = gas.id, size = gas.amount }, "fluid")
+                    if ok then
+                        nAdd = nAdd + 1
+                        ctx.write(string.format("槽 %d: 加 %s×%d（第 %d 项）", slot, gas.id, gas.amount, maxIdx + 1))
+                    else
+                        nFail = nFail + 1
+                        ctx.write(string.format("槽 %d: 加失败", slot))
+                    end
+                end
+            end
+        end
+        os.sleep(0)
+    end
+    ctx.write("")
+    ctx.write(string.format("完成：加 %d，改 %d，清 %d，跳过 %d，失败 %d",
+        nAdd, nChange, nClear, nSkip, nFail))
+    if ctx.select then
+        ctx.select({ { label = "好了", value = 1 } }, {
+            title = string.format("保护气：加 %d / 改 %d / 清 %d / 跳过 %d / 失败 %d",
+                nAdd, nChange, nClear, nSkip, nFail),
+            footer = "可以再去游戏里看看样板",
+        })
+    end
+    return nFail == 0
+end
+return M
+]====],
+    ["/home/tools/compression-fix.lua"] = [====[
+local component = require("component")
+local M = {
+    id = "compression-fix",
+    name = "压模改固化",
+    group = "AE2 样板",
+    order = 50,
+    desc = "按模具形状把输入换成对应熔融流体",
+}
+local SHAPE_WORDS = {
+    "Turbine Blade", "Drill Tip", "Drill Head", "Pipe", "Gear", "Rod", "Rotor",
+    "Plate", "Ring", "Screw", "Bolt", "Round", "Ingot", "Nugget",
+    "Block", "Casing", "Stick",
+}
+local function matchShape(label)
+    local lb = label
+    local function has(w)
+        return lb:find(w, 1, true) ~= nil
+    end
+    if has("Turbine Blade") then return { key = "Turbine Blade", l = 864, cn = "涡轮扇叶" } end
+    if has("Drill Tip") then return { key = "Drill Tip", l = 576, cn = "钻头" } end
+    if has("Drill Head") then return { key = "Drill Head", l = 576, cn = "钻头" } end
+    if has("Pipe") then
+        if has("Tiny") then return { key = "Tiny Pipe", l = 72, cn = "微型管道" } end
+        if has("Small") then return { key = "Small Pipe", l = 144, cn = "小型管道" } end
+        if has("Huge") then return { key = "Huge Pipe", l = 1728, cn = "巨型管道" } end
+        if has("Large") then return { key = "Large Pipe", l = 864, cn = "大型管道" } end
+        if has("Medium") then return { key = "Medium Pipe", l = 432, cn = "管道" } end
+        return { key = "Pipe", l = 432, cn = "管道" }
+    end
+    if has("Gear") then
+        if has("Small") then return { key = "Small Gear", l = 144, cn = "小型齿轮" } end
+        return { key = "Gear", l = 576, cn = "齿轮" }
+    end
+    if has("Rod") then
+        if has("Long") then return { key = "Long Rod", l = 144, cn = "长杆" } end
+        return { key = "Rod", l = 72, cn = "杆" }
+    end
+    if has("Rotor") then return { key = "Rotor", l = 612, cn = "转子" } end
+    if has("Plate") then return { key = "Plate", l = 144, cn = "板" } end
+    if has("Ring") then return { key = "Ring", l = 36, cn = "环" } end
+    if has("Screw") then return { key = "Screw", l = 18, cn = "螺丝" } end
+    if has("Bolt") then return { key = "Bolt", l = 18, cn = "螺栓" } end
+    if has("Round") then return { key = "Round", l = 16, cn = "滚珠" } end
+    if has("Ingot") then return { key = "Ingot", l = 144, cn = "锭" } end
+    if has("Nugget") then return { key = "Nugget", l = 16, cn = "粒" } end
+    if has("Block") then return { key = "Block", l = 1296, cn = "块" } end
+    if has("Casing") then return { key = "Casing", l = 72, cn = "外壳" } end
+    if has("Stick") then return { key = "Stick", l = 72, cn = "杆" } end
+    return nil
+end
+local function materialOf(label)
+    local m = label
+    m = m:gsub("^Tiny%s+", ""):gsub("^Small%s+", ""):gsub("^Large%s+", "")
+    m = m:gsub("^Huge%s+", ""):gsub("^Medium%s+", ""):gsub("^Long%s+", "")
+    m = m:gsub("^Hot%s+", "")
+    for _, w in ipairs(SHAPE_WORDS) do
+        m = m:gsub("%s*" .. w .. "$", "")
+    end
+    m = m:gsub("^Block%s+of%s+", "")
+    m = m:gsub("^Block%s+", "")
+    m = m:gsub("^of%s+", "")
+    m = m:gsub("%s*Fluid$", "")
+    m = m:gsub("^%s+", ""):gsub("%s+$", "")
+    return m
+end
+local ALIASES = {
+    ["plutonium239"] = "molten.plutonium",
+    ["rawsilicon"] = "molten.silicon",
+    ["uranium238"] = "molten.uranium",
+    ["awakeneddraconium"] = "molten.draconiumawakened",
+    ["endium"] = "molten.heeendium",
+    ["deepdarkiron"] = "molten.darkiron",
+    ["fluxedelectrum"] = "molten.electrumflux",
+    ["hslasteel"] = "molten.hsla",
+    ["enrichednaquadah"] = "molten.naquadahenriched",
+    ["fluxedobsidian"] = "molten.obsidianflux",
+    ["voidmetal"] = "molten.void",
+    ["polyethylene"] = "molten.plastic",
+    ["siliconerubber"] = "molten.silicone",
+    ["purifiedtengam"] = "molten.tengampurified",
+    ["attunedtengam"] = "molten.tengamattuned",
+    ["siliconsolargradepolysi"] = "molten.siliconsolargrade",
+    ["obzinite"] = "molten.alumite",
+    ["fiberreinforcedepoxyresin"] = "molten.epoxidfiberreinforced",
+    ["blackgranite"] = "molten.graniteblack",
+    ["magneticiron"] = "molten.ironmagnetic",
+    ["magneticneodymium"] = "molten.neodymiummagnetic",
+    ["magneticsamarium"] = "molten.samariummagnetic",
+    ["magneticsteel"] = "molten.steelmagnetic",
+    ["redgranite"] = "molten.granitered",
+    ["shadowmetal"] = "molten.shadow",
+    ["claycompound"] = "molten.crudesteel",
+    ["superconductorbasemv"] = "molten.pentacadmiummagnesiumhexaoxid",
+    ["superconductorbasehv"] = "molten.titaniumonabariumdecacoppereikosaoxid",
+    ["superconductorbaseev"] = "molten.uraniumtriplatinid",
+    ["superconductorbaseiv"] = "molten.vanadiumtriindinid",
+    ["superconductorbaseluv"] = "molten.tetraindiumditindibariumtitaniumheptacoppertetrakaidekaoxid",
+    ["superconductorbasezpm"] = "molten.tetranaquadahdiindiumhexaplatiumosminid",
+    ["superconductorbaseuv"] = "molten.longasssuperconductornameforuvwire",
+    ["superconductorbaseuhv"] = "molten.longasssuperconductornameforuhvwire",
+    ["superconductorbaseuev"] = "molten.superconductoruevbase",
+    ["superconductorbaseuiv"] = "molten.superconductoruivbase",
+    ["superconductorbaseumv"] = "molten.superconductorumvbase",
+    ["radoxpolymer"] = "molten.radoxpoly",
+}
+local function fluidCandidates(mat)
+    local out = {}
+    local key = mat:lower():gsub("[^%w]", "")
+    if ALIASES[key] then
+        out[#out + 1] = ALIASES[key]
+    end
+    local a = mat:lower():gsub("%s+", "_")
+    local b = mat:lower():gsub("%s+", "")
+    out[#out + 1] = "molten." .. a
+    if b ~= a then out[#out + 1] = "molten." .. b end
+    return out
+end
+local function findIface()
+    for addr in component.list("fluid_interface") do
+        return component.proxy(addr), "fluid_interface"
+    end
+    for addr in component.list("me_interface") do
+        return component.proxy(addr), "me_interface"
+    end
+    return nil, nil
+end
+function M.run(ctx, args)
+    local iface = findIface()
+    if not iface then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "找不到ME接口", footer = "检查适配器是否紧贴方块",
+            })
+        else
+            ctx.write("找不到ME接口")
+        end
+        return false
+    end
+    ctx.clear()
+    ctx.write("压模改固化：扫描全部样板")
+    ctx.write(string.rep("-", 56))
+    local nDone, nSkip, nFail = 0, 0, 0
+    for slot = 1, 36 do
+        local okP, p = pcall(iface.getInterfacePattern, slot)
+        if okP and p and p.outputs then
+            local best = nil
+            for _, e in pairs(p.outputs) do
+                local lb = tostring(e.label or "")
+                if lb ~= "" and not tostring(e.name or ""):lower():find("molten") then
+                    local s = matchShape(lb)
+                    if s then
+                        best = { e = e, shape = s, label = lb }
+                        break
+                    end
+                end
+            end
+            if best then
+                local mat = materialOf(best.label)
+                local need = (tonumber(best.e.size) or 1) * best.shape.l
+                local targetIdx, targetLabel, alreadyFluid = nil, nil, false
+                if p.inputs then
+                    for idx, e in pairs(p.inputs) do
+                        local inLabel = tostring(e.label or "")
+                        local inName = tostring(e.name or ""):lower()
+                        if inLabel:lower():find(mat:lower(), 1, true) then
+                            if inName:find("molten") or inName:find("fluid") then
+                                alreadyFluid = true
+                                targetLabel = inLabel
+                            else
+                                targetIdx, targetLabel = idx, inLabel
+                            end
+                            break
+                        end
+                    end
+                end
+                if alreadyFluid then
+                    nSkip = nSkip + 1
+                elseif not targetIdx then
+                    nSkip = nSkip + 1
+                    ctx.write(string.format("槽%d %s：输入里没有含「%s」的项",
+                        slot, best.shape.cn, mat))
+                else
+                    local done = false
+                    for _, fname in ipairs(fluidCandidates(mat)) do
+                        local okc = pcall(function()
+                            return iface.setInterfacePatternInput(slot, targetIdx,
+                                { name = fname, size = need }, "fluid")
+                        end)
+                        if okc then
+                            done = true
+                            break
+                        end
+                    end
+                    if done then
+                        nDone = nDone + 1
+                        ctx.write(string.format("槽%d %s ×%s → %s ×%d",
+                            slot, best.shape.cn, tostring(best.e.size),
+                            fluidCandidates(mat)[1], need))
+                    else
+                        nFail = nFail + 1
+                        ctx.write(string.format("槽%d %s：流体名 %s 不存在",
+                            slot, best.shape.cn, fluidCandidates(mat)[1]))
+                    end
+                end
+            end
+        end
+        os.sleep(0)
+    end
+    ctx.write(string.rep("-", 56))
+    ctx.write(string.format("完成：改了 %d 个，跳过 %d 个，失败 %d 个", nDone, nSkip, nFail))
+    if ctx.select then
+        ctx.select({ { label = "好了", value = 1 } }, {
+            title = string.format("压模改固化：改 %d / 跳过 %d / 失败 %d", nDone, nSkip, nFail),
+            footer = "输入已经是流体的样班会自动跳过",
+        })
+    end
+    return nFail == 0
+end
+return M
+]====],
+    ["/home/tools/pattern-gen.lua"] = [====[
+local component = require("component")
+local M = {
+    id = "pattern-gen",
+    name = "样板生成",
+    group = "AE2 样板",
+    order = 1,
+    desc = "NAC / 神锻等离子 / 夸克 / 磁物质",
+}
+local RECIPES = {
+    {
+        name = "皮米电路",
+        out = {
+            { name = "dreamcraft:PikoCircuit", damage = 0, size = 1 },
+        },
+        ins = {
+            { name = "gregtech:gt.metaitem.01", damage = 29979, size = 16, label = "Thin Radox Polymer Sheet" },
+            { name = "miscutils:blockFrameGtCelestialTungsten", damage = 0, size = 2, label = "Celestial Tungsten Frame Box" },
+            { name = "miscutils:itemScrewAstralTitanium", damage = 0, size = 4, label = "Astral Titanium Screw" },
+            { name = "gregtech:gt.metaitem.02", damage = 18974, size = 1, label = "Superconductor Base UEV Casing" },
+            { name = "miscutils:itemPlateRhugnor", damage = 0, size = 2, label = "Rhugnor Plate" },
+            { name = "gregtech:gt.metaitem.03", damage = 32157, size = 2, label = "Optical Mainframe" },
+            { name = "gregtech:gt.metaitem.03", damage = 32269, size = 8, label = "Opto Power IC" },
+            { name = "molten.kevlar", size = 288, fluid = true, label = "Molten Kevlar" },
+            { name = "bartworks:gt.bwMetaGeneratedscrew", damage = 10110, size = 2, label = "Enriched Naquadah Alloy Screw" },
+            { name = "miscutils:itemBoltRhugnor", damage = 0, size = 8, label = "Rhugnor Bolt" },
+            { name = "spatialfluid", size = 250, fluid = true, label = "Spatially Enlarged Fluid" },
+            { name = "gregtech:gt.metaitem.01", damage = 32728, size = 4, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.02", damage = 19154, size = 64, label = "Fine Proto-Halkonite Steel Wire" },
+            { name = "gregtech:gt.metaitem.01", damage = 26581, size = 32, label = "Transcendent Metal Bolt" },
+            { name = "dimensionallyshiftedsuperfluid", size = 80, fluid = true, label = "Dimensionally Shifted Superfluid" },
+            { name = "grade6purifiedwater", size = 500, fluid = true, label = "Grade 6 Water" },
+            { name = "lubricant", size = 640, fluid = true, label = "Lubricant" },
+            { name = "gregtech:gt.blockmachines", damage = 11430, size = 8, label = "1x Infinity Wire" },
+            { name = "molten.mutatedlivingsolder", size = 2304, fluid = true, label = "Mutated Living Solder" },
+            { name = "ic2uumatter", size = 8000, fluid = true, label = "UU-Matter" },
+            { name = "molten.precious metals alloy", size = 1152, fluid = true, label = "Molten Precious Metals Alloy" },
+            { name = "gregtech:gt.metaitem.03", damage = 32181, size = 32, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32178, size = 32, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32179, size = 32, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32184, size = 32, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32180, size = 32, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32181, size = 32, label = "Optical SMD Capacitor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32179, size = 32, label = "Optical SMD Diode" },
+            { name = "gregtech:gt.metaitem.03", damage = 32184, size = 32, label = "Optical SMD Inductor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32180, size = 32, label = "Optical SMD Transistor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32178, size = 32, label = "Optical SMD Resistor" },
+        },
+    },
+    {
+        name = "量子电路",
+        out = {
+            { name = "dreamcraft:QuantumCircuit", damage = 0, size = 1 },
+        },
+        ins = {
+            { name = "bartworks:gt.bwMetaGeneratedfoil", damage = 10112, size = 32, label = "Shirabon Foil" },
+            { name = "miscutils:blockFrameGtHypogen", damage = 0, size = 2, label = "Hypogen Frame Box" },
+            { name = "gregtech:gt.metaitem.01", damage = 27147, size = 4, label = "Six-Phased Copper Screw" },
+            { name = "gregtech:gt.metaitem.02", damage = 18149, size = 1, label = "Cream Casing" },
+            { name = "dreamcraft:PikoCircuit", damage = 0, size = 2, label = "Pico Circuit" },
+            { name = "miscutils:itemScrewQuantum", damage = 0, size = 2, label = "Quantum Screw" },
+            { name = "bartworks:gt.bwMetaGeneratedplate", damage = 10111, size = 2, label = "Metastable Oganesson Plate" },
+            { name = "bartworks:gt.bwMetaGeneratedbolt", damage = 10111, size = 8, label = "Metastable Oganesson Bolt" },
+            { name = "gregtech:gt.metaitem.03", damage = 32271, size = 8, label = "Zepto Power IC" },
+            { name = "bartworks:gt.bwMetaGeneratedwireFine", damage = 10106, size = 4, label = "Fine Tairitsu Wire" },
+            { name = "gregtech:gt.metaitem.02", damage = 19190, size = 8, label = "Fine Churitsu Wire" },
+            { name = "gregtech:gt.metaitem.02", damage = 19189, size = 4, label = "Fine Shijima Wire" },
+            { name = "gregtech:gt.metaitem.03", damage = 32179, size = 64, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32178, size = 64, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32181, size = 64, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32180, size = 64, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32184, size = 64, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.02", damage = 19154, size = 64, label = "Fine Proto-Halkonite Steel Wire" },
+            { name = "gregtech:gt.metaitem.01", damage = 26134, size = 64, label = "Superconductor Base UMV Bolt" },
+            { name = "gregtech:gt.blockmachines", damage = 2606, size = 8, label = "1x SpaceTime Wire" },
+            { name = "molten.mutatedlivingsolder", size = 4608, fluid = true, label = "Mutated Living Solder" },
+            { name = "lubricant", size = 1280, fluid = true, label = "Lubricant" },
+            { name = "ic2uumatter", size = 16000, fluid = true, label = "UU-Matter" },
+            { name = "molten.sixphasedcopper", size = 144, fluid = true, label = "Molten Six-Phased Copper" },
+            { name = "exciteddtec", size = 1000, fluid = true, label = "Excited D.T. Exotic Catalyst" },
+            { name = "spatialfluid", size = 500, fluid = true, label = "Spatially Enlarged Fluid" },
+            { name = "dimensionallyshiftedsuperfluid", size = 80, fluid = true, label = "Dimensionally Shifted Superfluid" },
+            { name = "grade7purifiedwater", size = 1000, fluid = true, label = "Grade 7 Water" },
+            { name = "dimensionallytranscendentresidue", size = 2000, fluid = true, label = "Dimensionally Transcendent Residue" },
+            { name = "gregtech:gt.metaitem.03", damage = 32728, size = 8, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32181, size = 64, label = "Optical SMD Capacitor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32178, size = 64, label = "Optical SMD Resistor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32179, size = 64, label = "Optical SMD Diode" },
+            { name = "gregtech:gt.metaitem.03", damage = 32184, size = 64, label = "Optical SMD Inductor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32180, size = 64, label = "Optical SMD Transistor" },
+        },
+    },
+}
+local ELEMENTS = {
+    { kind = "dust", cn = "铍", en = "beryllium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2008, cell = "gregtech:gt.metaitem.01", cellMeta = 31008 },
+    { kind = "dust", cn = "锔", en = "curium", weight = 10, reg = "miscutils:itemDustCurium", meta = 2, cell = "miscutils:itemCellPlasmaCurium", cellMeta = 0 },
+    { kind = "dust", cn = "铈", en = "cerium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2065, cell = "gregtech:gt.metaitem.01", cellMeta = 31065 },
+    { kind = "dust", cn = "铝", en = "aluminium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2019, cell = "gregtech:gt.metaitem.01", cellMeta = 31019 },
+    { kind = "dust", cn = "铪", en = "hafnium", weight = 6, reg = "bartworks:gt.bwMetaGenerateddust", meta = 11000, cell = "miscutils:itemCellPlasmaHafnium", cellMeta = 0 },
+    { kind = "dust", cn = "镨", en = "praseodymium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2066, cell = "gregtech:gt.metaitem.01", cellMeta = 31066 },
+    { kind = "dust", cn = "钠", en = "sodium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2017, cell = "gregtech:gt.metaitem.01", cellMeta = 31017 },
+    { kind = "dust", cn = "砷", en = "arsenic", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2039, cell = "gregtech:gt.metaitem.01", cellMeta = 31039 },
+    { kind = "dust", cn = "锶", en = "strontium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2044, cell = "gregtech:gt.metaitem.01", cellMeta = 31044 },
+    { kind = "dust", cn = "钕", en = "neodymium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2067, cell = "gregtech:gt.metaitem.01", cellMeta = 31067 },
+    { kind = "dust", cn = "钛", en = "titanium", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2028, cell = "gregtech:gt.metaitem.01", cellMeta = 31028 },
+    { kind = "dust", cn = "钡", en = "barium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2063, cell = "gregtech:gt.metaitem.01", cellMeta = 31063 },
+    { kind = "dust", cn = "镓", en = "gallium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2037, cell = "gregtech:gt.metaitem.01", cellMeta = 31037 },
+    { kind = "dust", cn = "锂", en = "lithium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2006, cell = "gregtech:gt.metaitem.01", cellMeta = 31006 },
+    { kind = "dust", cn = "铌", en = "niobium", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2047, cell = "gregtech:gt.metaitem.01", cellMeta = 31047 },
+    { kind = "dust", cn = "钒", en = "vanadium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2029, cell = "gregtech:gt.metaitem.01", cellMeta = 31029 },
+    { kind = "dust", cn = "碳", en = "carbon", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2010, cell = "gregtech:gt.metaitem.01", cellMeta = 31010 },
+    { kind = "dust", cn = "陨铁", en = "meteoriciron", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2340, cell = "gregtech:gt.metaitem.01", cellMeta = 31340 },
+    { kind = "dust", cn = "铷", en = "rubidium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2043, cell = "gregtech:gt.metaitem.01", cellMeta = 31043 },
+    { kind = "dust", cn = "铕", en = "europium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2070, cell = "gregtech:gt.metaitem.01", cellMeta = 31070 },
+    { kind = "dust", cn = "钯", en = "palladium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2052, cell = "gregtech:gt.metaitem.01", cellMeta = 31052 },
+    { kind = "dust", cn = "铜", en = "copper", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2035, cell = "gregtech:gt.metaitem.01", cellMeta = 31035 },
+    { kind = "dust", cn = "阿迪特", en = "ardite", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2382, cell = "gregtech:gt.metaitem.01", cellMeta = 31382 },
+    { kind = "dust", cn = "镍", en = "nickel", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2034, cell = "gregtech:gt.metaitem.01", cellMeta = 31034 },
+    { kind = "dust", cn = "硅", en = "silicon", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2020, cell = "gregtech:gt.metaitem.01", cellMeta = 31020 },
+    { kind = "dust", cn = "钍-232", en = "thorium232", weight = 6, reg = "bartworks:gt.bwMetaGenerateddust", meta = 30, cell = "miscutils:itemCellPlasmaThorium232", cellMeta = 0 },
+    { kind = "dust", cn = "钌", en = "ruthenium", weight = 6, reg = "bartworks:gt.bwMetaGenerateddust", meta = 64, cell = "miscutils:itemCellPlasmaRuthenium", cellMeta = 0 },
+    { kind = "dust", cn = "锗", en = "germanium", weight = 2, reg = "miscutils:itemDustGermanium", meta = 28, cell = "miscutils:itemCellPlasmaGermanium", cellMeta = 0 },
+    { kind = "dust", cn = "钴", en = "cobalt", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2033, cell = "gregtech:gt.metaitem.01", cellMeta = 31033 },
+    { kind = "dust", cn = "锡", en = "tin", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2057, cell = "gregtech:gt.metaitem.01", cellMeta = 31057 },
+    { kind = "dust", cn = "铼", en = "rhenium", weight = 2, reg = "miscutils:itemDustRhenium", meta = 31, cell = "miscutils:itemCellPlasmaRhenium", cellMeta = 0 },
+    { kind = "dust", cn = "铥", en = "thulium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2076, cell = "gregtech:gt.metaitem.01", cellMeta = 31076 },
+    { kind = "dust", cn = "锆", en = "zirconium", weight = 6, reg = "bartworks:gt.bwMetaGenerateddust", meta = 3, cell = "miscutils:itemCellPlasmaZirconium", cellMeta = 0 },
+    { kind = "dust", cn = "铀-235", en = "uranium235", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2097, cell = "gregtech:gt.metaitem.01", cellMeta = 31097 },
+    { kind = "dust", cn = "镥", en = "lutetium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2078, cell = "gregtech:gt.metaitem.01", cellMeta = 31078 },
+    { kind = "dust", cn = "碘", en = "iodine", weight = 6, reg = "bartworks:gt.bwMetaGenerateddust", meta = 11012, cell = "miscutils:itemCellPlasmaIodine", cellMeta = 0 },
+    { kind = "dust", cn = "铑", en = "rhodium", weight = 6, reg = "bartworks:gt.bwMetaGenerateddust", meta = 78, cell = "miscutils:itemCellPlasmaRhodium", cellMeta = 0 },
+    { kind = "dust", cn = "钬", en = "holmium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2074, cell = "gregtech:gt.metaitem.01", cellMeta = 31074 },
+    { kind = "dust", cn = "铟", en = "indium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2056, cell = "gregtech:gt.metaitem.01", cellMeta = 31056 },
+    { kind = "dust", cn = "钷", en = "promethium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2068, cell = "gregtech:gt.metaitem.01", cellMeta = 31068 },
+    { kind = "dust", cn = "铊", en = "thallium", weight = 2, reg = "miscutils:itemDustThallium", meta = 41, cell = "miscutils:itemCellPlasmaThallium", cellMeta = 0 },
+    { kind = "dust", cn = "铀-238", en = "uranium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2098, cell = "gregtech:gt.metaitem.01", cellMeta = 31098 },
+    { kind = "dust", cn = "钇", en = "yttrium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2045, cell = "gregtech:gt.metaitem.01", cellMeta = 31045 },
+    { kind = "dust", cn = "戴斯", en = "desh", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2884, cell = "gregtech:gt.metaitem.01", cellMeta = 31884 },
+    { kind = "dust", cn = "钆", en = "gadolinium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2071, cell = "gregtech:gt.metaitem.01", cellMeta = 31071 },
+    { kind = "dust", cn = "锌", en = "zinc", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2036, cell = "gregtech:gt.metaitem.01", cellMeta = 31036 },
+    { kind = "dust", cn = "钽", en = "tantalum", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2080, cell = "gregtech:gt.metaitem.01", cellMeta = 31080 },
+    { kind = "dust", cn = "银", en = "silver", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2054, cell = "gregtech:gt.metaitem.01", cellMeta = 31054 },
+    { kind = "dust", cn = "镝", en = "dysprosium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2073, cell = "gregtech:gt.metaitem.01", cellMeta = 31073 },
+    { kind = "dust", cn = "金", en = "gold", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2086, cell = "gregtech:gt.metaitem.01", cellMeta = 31086 },
+    { kind = "dust", cn = "锑", en = "antimony", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2058, cell = "gregtech:gt.metaitem.01", cellMeta = 31058 },
+    { kind = "dust", cn = "钨", en = "tungsten", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2081, cell = "gregtech:gt.metaitem.01", cellMeta = 31081 },
+    { kind = "dust", cn = "镧", en = "lanthanum", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2064, cell = "gregtech:gt.metaitem.01", cellMeta = 31064 },
+    { kind = "dust", cn = "磷", en = "phosphorus", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2021, cell = "gregtech:gt.metaitem.01", cellMeta = 31021 },
+    { kind = "dust", cn = "铽", en = "terbium", weight = 1, reg = "gregtech:gt.metaitem.01", meta = 2072, cell = "gregtech:gt.metaitem.01", cellMeta = 31072 },
+    { kind = "dust", cn = "镁", en = "magnesium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2018, cell = "gregtech:gt.metaitem.01", cellMeta = 31018 },
+    { kind = "dust", cn = "锰", en = "manganese", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2031, cell = "gregtech:gt.metaitem.01", cellMeta = 31031 },
+    { kind = "dust", cn = "镅", en = "americium", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2103, cell = "gregtech:gt.metaitem.01", cellMeta = 31103 },
+    { kind = "dust", cn = "铒", en = "erbium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2075, cell = "gregtech:gt.metaitem.01", cellMeta = 31075 },
+    { kind = "dust", cn = "钐", en = "samarium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2069, cell = "gregtech:gt.metaitem.01", cellMeta = 31069 },
+    { kind = "dust", cn = "铁", en = "iron", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2032, cell = "gregtech:gt.metaitem.01", cellMeta = 31032 },
+    { kind = "dust", cn = "碲", en = "tellurium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2059, cell = "gregtech:gt.metaitem.01", cellMeta = 31059 },
+    { kind = "dust", cn = "镉", en = "cadmium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2055, cell = "gregtech:gt.metaitem.01", cellMeta = 31055 },
+    { kind = "dust", cn = "奥利哈钢", en = "oriharukon", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2393, cell = "gregtech:gt.metaitem.01", cellMeta = 31393 },
+    { kind = "dust", cn = "钾", en = "potassium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2025, cell = "gregtech:gt.metaitem.01", cellMeta = 31025 },
+    { kind = "dust", cn = "铯", en = "caesium", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2062, cell = "gregtech:gt.metaitem.01", cellMeta = 31062 },
+    { kind = "dust", cn = "钙", en = "calcium", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2026, cell = "gregtech:gt.metaitem.01", cellMeta = 31026 },
+    { kind = "dust", cn = "硫", en = "sulfur", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2022, cell = "gregtech:gt.metaitem.01", cellMeta = 31022 },
+    { kind = "dust", cn = "钼", en = "molybdenum", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2048, cell = "gregtech:gt.metaitem.01", cellMeta = 31048 },
+    { kind = "dust", cn = "镱", en = "ytterbium", weight = 2, reg = "gregtech:gt.metaitem.01", meta = 2077, cell = "gregtech:gt.metaitem.01", cellMeta = 31077 },
+    { kind = "gas",  cn = "氦", en = "helium", weight = 10, cell = "gregtech:gt.metaitem.01", cellMeta = 31004 },
+    { kind = "gas",  cn = "氢", en = "hydrogen", weight = 10, cell = "gregtech:gt.metaitem.01", cellMeta = 31001 },
+    { kind = "gas",  cn = "氯", en = "chlorine", weight = 6, cell = "gregtech:gt.metaitem.01", cellMeta = 31023 },
+    { kind = "gas",  cn = "氮", en = "nitrogen", weight = 10, cell = "gregtech:gt.metaitem.01", cellMeta = 31012 },
+    { kind = "gas",  cn = "汞", en = "mercury", weight = 6, cell = "gregtech:gt.metaitem.01", cellMeta = 31087 },
+    { kind = "gas",  cn = "氘", en = "deuterium", weight = 6, cell = "gregtech:gt.metaitem.01", cellMeta = 31002 },
+    { kind = "gas",  cn = "氡", en = "radon", weight = 10, cell = "gregtech:gt.metaitem.01", cellMeta = 31093 },
+    { kind = "gas",  cn = "氩", en = "argon", weight = 6, cell = "gregtech:gt.metaitem.01", cellMeta = 31024 },
+    { kind = "gas",  cn = "氚", en = "tritium", weight = 6, cell = "gregtech:gt.metaitem.01", cellMeta = 31003 },
+    { kind = "gas",  cn = "氟", en = "fluorine", weight = 6, cell = "gregtech:gt.metaitem.01", cellMeta = 31014 },
+}
+local CI_ITEMS = {
+    { cn = "基岩", en = "bedrockium", reg = "gregtech:gt.metaitem.01", meta = 2395, cell = "gregtech:gt.metaitem.01", cellMeta = 31395, plasma = "plasma.bedrockium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11395 },
+    { cn = "龙", en = "draconium", reg = "gregtech:gt.metaitem.01", meta = 2975, cell = "gregtech:gt.metaitem.01", cellMeta = 31975, plasma = "plasma.draconium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11975 },
+    { cn = "三钛", en = "tritanium", reg = "gregtech:gt.metaitem.01", meta = 2329, cell = "gregtech:gt.metaitem.01", cellMeta = 31329, plasma = "plasma.tritanium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11329 },
+    { cn = "海珀珍", en = "hypogen", reg = "miscutils:itemDustHypogen", meta = 0, cell = "miscutils:itemCellPlasmaHypogen", cellMeta = 0, plasma = "plasma.hypogen" , ingot = "miscutils:itemIngotHypogen", ingotMeta = 0 },
+    { cn = "龙血", en = "dragonblood", reg = "miscutils:itemDustDragonblood", meta = 0, cell = "miscutils:itemCellPlasmaDragonblood", cellMeta = 0, plasma = "plasma.dragonblood" , ingot = "miscutils:itemIngotDragonblood", ingotMeta = 0 },
+    { cn = "灵宝", en = "ichorium", reg = "gregtech:gt.metaitem.01", meta = 2978, cell = "gregtech:gt.metaitem.01", cellMeta = 31978, plasma = "plasma.ichorium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11978 },
+    { cn = "无尽", en = "infinity", reg = "gregtech:gt.metaitem.01", meta = 2397, cell = "gregtech:gt.metaitem.01", cellMeta = 31397, plasma = "plasma.infinity" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11397 },
+    { cn = "中子", en = "neutronium", reg = "gregtech:gt.metaitem.01", meta = 2129, cell = "gregtech:gt.metaitem.01", cellMeta = 31129, plasma = "plasma.neutronium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11129 },
+    { cn = "宇宙中子态素", en = "cosmicneutronium", reg = "gregtech:gt.metaitem.01", meta = 2982, cell = "gregtech:gt.metaitem.01", cellMeta = 31982, plasma = "plasma.cosmicneutronium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11982 },
+    { cn = "彩色玻璃", en = "chromaticglass", reg = "miscutils:itemDustChromaticGlass", meta = 0, cell = "miscutils:itemCellPlasmaChromaticGlass", cellMeta = 0, plasma = "plasma.chromaticglass" , ingot = "miscutils:itemIngotChromaticGlass", ingotMeta = 0 },
+    { cn = "𫓧", en = "flerovium", reg = "gregtech:gt.metaitem.01", meta = 2984, cell = "gregtech:gt.metaitem.01", cellMeta = 31984, plasma = "plasma.flerovium_gt5u" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11984 },
+    { cn = "觉醒龙", en = "draconiumawakened", reg = "gregtech:gt.metaitem.01", meta = 2976, cell = "gregtech:gt.metaitem.01", cellMeta = 31976, plasma = "plasma.draconiumawakened" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11976 },
+    { cn = "鲁格诺", en = "rhugnor", reg = "miscutils:itemDustRhugnor", meta = 0, cell = "miscutils:itemCellPlasmaRhugnor", cellMeta = 0, plasma = "plasma.rhugnor" , ingot = "miscutils:itemIngotRhugnor", ingotMeta = 0 },
+    { cn = "天体钨", en = "celestialtungsten", reg = "miscutils:itemDustCelestialTungsten", meta = 0, cell = "miscutils:itemCellPlasmaCelestialTungsten", cellMeta = 0, plasma = "plasma.celestialtungsten" , ingot = "miscutils:itemIngotCelestialTungsten", ingotMeta = 0 },
+}
+local function findIfaces()
+    local list = {}
+    for addr in component.list("fluid_interface") do
+        list[#list + 1] = component.proxy(addr)
+    end
+    if #list == 0 then
+        for addr in component.list("me_interface") do
+            list[#list + 1] = component.proxy(addr)
+        end
+    end
+    return list
+end
+local function findDb()
+    for addr in component.list("database") do
+        return component.proxy(addr)
+    end
+    return nil
+end
+local function usedSlots(ifaces)
+    local out = {}
+    for _, iface in ipairs(ifaces) do
+        for slot = 1, 36 do
+            local ok, p = pcall(iface.getInterfacePattern, slot)
+            if ok and p then
+                out[#out + 1] = { iface = iface, slot = slot }
+            end
+        end
+    end
+    return out
+end
+local function say(ctx, title, footer)
+    if ctx.select then
+        ctx.select({ { label = "知道了", value = 1 } }, { title = title, footer = footer })
+    else
+        ctx.write(title)
+    end
+end
+local function writeOne(s, w, db)
+    local nErr = nil
+    local iface, slot = s.iface, s.slot
+    for i, o in ipairs(w.outs) do
+        local ok, err
+        if o.rename and db then
+            ok, err = pcall(db.set, 1, o.name, o.damage or 0, '{display:{Name:"' .. o.rename .. '"}}')
+            if ok then
+                ok, err = pcall(iface.setInterfacePatternOutput, slot, i, db.address, 1, o.size or 1)
+            end
+        elseif o.fluid then
+            ok, err = pcall(iface.setInterfacePatternOutput, slot, i, { name = o.name, size = o.size }, "fluid")
+        else
+            ok, err = pcall(iface.setInterfacePatternOutput, slot, i,
+                { name = o.name, size = o.size, damage = o.damage or 0 }, "item")
+        end
+        if not ok then nErr = tostring(err) end
+    end
+    for i, e in ipairs(w.ins) do
+        local ok, err
+        if e.rename and e.renameTo and db then
+            ok, err = pcall(db.set, 1, e.name, e.damage or 0, '{display:{Name:"' .. e.renameTo .. '"}}')
+            if ok then
+                ok, err = pcall(iface.setInterfacePatternInput, slot, i, db.address, 1, e.size)
+            end
+        elseif e.fluid then
+            ok, err = pcall(iface.setInterfacePatternInput, slot, i, { name = e.name, size = e.size }, "fluid")
+        else
+            ok, err = pcall(iface.setInterfacePatternInput, slot, i,
+                { name = e.name, size = e.size, damage = e.damage or 0 }, "item")
+        end
+        if not ok then nErr = tostring(err) end
+    end
+    return nErr
+end
+local function item(name, size, damage)
+    return { name = name, size = size, damage = damage or 0 }
+end
+local function fluid(name, size)
+    return { name = name, size = size, fluid = true }
+end
+local function plasmaOf(e, size)
+    return fluid("plasma." .. e.en, size)
+end
+local function cellOf(e)
+    return item(e.cell, 1, e.cellMeta)
+end
+local function ingotOf(e)
+    return item(e.ingot, 1, e.ingotMeta)
+end
+local function powderOf(e)
+    return item(e.reg, 1, e.meta)
+end
+local MOLTEN = {
+    tritanium = true, hypogen = true, chromaticglass = true,
+    dragonblood = true, flerovium = true, infinity = true,
+    americium = true, curium = true, rhugnor = true,
+}
+local function moltenName(en)
+    if en == "flerovium" then return "molten.flerovium_gt5u" end
+    return "molten." .. en
+end
+local function genNAC(idx, renameTo)
+    local r = RECIPES[idx]
+    local ins = {}
+    for _, e in ipairs(r.ins) do
+        local t = item(e.name, e.size, e.damage)
+        t.fluid = e.fluid
+        if e.rename then
+            t.rename = true
+            t.renameTo = renameTo or e.label
+        end
+        ins[#ins + 1] = t
+    end
+    local outs = {}
+    for _, o in ipairs(r.out) do
+        outs[#outs + 1] = item(o.name, o.size, o.damage)
+    end
+    return { { tag = r.name, outs = outs, ins = ins } }
+end
+local function genPlasma()
+    local list = {}
+    for _, e in ipairs(ELEMENTS) do
+        if e.kind == "gas" then
+            list[#list + 1] = {
+                tag = e.cn .. " 气体→等离子",
+                outs = { fluid("plasma." .. e.en, 500) },
+                ins = { fluid(e.en, 500) },
+            }
+        elseif MOLTEN[e.en] then
+            list[#list + 1] = {
+                tag = e.cn .. " 熔融→等离子",
+                outs = { plasmaOf(e, 144) },
+                ins = { fluid(moltenName(e.en), 144) },
+            }
+        else
+            list[#list + 1] = {
+                tag = e.cn .. " 粉→等离子",
+                outs = { plasmaOf(e, 144) },
+                ins = { powderOf(e) },
+            }
+        end
+    end
+    for _, e in ipairs(CI_ITEMS) do
+        if MOLTEN[e.en] then
+            list[#list + 1] = {
+                tag = e.cn .. " 熔融→等离子（磁物质）",
+                outs = { fluid(e.plasma, 144) },
+                ins = { fluid(moltenName(e.en), 144) },
+            }
+        else
+            list[#list + 1] = {
+                tag = e.cn .. " 粉→等离子（磁物质）",
+                outs = { fluid(e.plasma, 144) },
+                ins = { powderOf(e) },
+            }
+        end
+    end
+    return list
+end
+local function genQuark(which)
+    local list = {}
+    if which == "fapei" then
+        for _, e in ipairs(ELEMENTS) do
+            if e.kind == "gas" then
+                list[#list + 1] = {
+                    tag = e.cn .. " 气体→单元",
+                    outs = { cellOf(e) },
+                    ins = { fluid(e.en, 1), plasmaOf(e, 1000) },
+                }
+            else
+                list[#list + 1] = {
+                    tag = e.cn .. " 粉→单元",
+                    outs = { cellOf(e) },
+                    ins = { powderOf(e), plasmaOf(e, 1296) },
+                }
+            end
+        end
+    elseif which == "sum" then
+        local ins = {}
+        for _, e in ipairs(ELEMENTS) do
+            ins[#ins + 1] = item(e.cell, 2000000000, e.cellMeta)
+        end
+        list[1] = {
+            tag = "夸克汇总下单",
+            outs = { item("minecraft:iron_sword", 1) },
+            ins = ins,
+        }
+    elseif which == "refill" then
+        local ins = {}
+        for _, e in ipairs(ELEMENTS) do
+            local per = (e.kind == "gas") and 1000 or 1296
+            ins[#ins + 1] = fluid("plasma." .. e.en, e.weight * per)
+        end
+        list[1] = {
+            tag = "夸克等离子补货",
+            outs = { { name = "minecraft:fish", size = 1, damage = 0, rename = "夸克等离子补货" } },
+            ins = ins,
+        }
+    end
+    return list
+end
+local function genCI(which)
+    local list = {}
+    if which == "fapei" then
+        for _, e in ipairs(CI_ITEMS) do
+            list[#list + 1] = {
+                tag = e.cn .. " 发配",
+                outs = { cellOf(e) },
+                ins = { powderOf(e), fluid(e.plasma, 144), fluid("spatialfluid", 1) },
+            }
+        end
+        list[#list + 1] = {
+            tag = "富快子+空间流体",
+            outs = { item("minecraft:iron_sword", 1) },
+            ins = { fluid("temporalfluid", 1), fluid("spatialfluid", 1) },
+        }
+    elseif which == "powder" then
+        for _, e in ipairs(CI_ITEMS) do
+            list[#list + 1] = {
+                tag = e.cn .. " 粉→锭",
+                outs = { ingotOf(e) },
+                ins = { powderOf(e) },
+            }
+        end
+    elseif which == "sum" then
+        local ins1 = {}
+        for _, e in ipairs(CI_ITEMS) do
+            ins1[#ins1 + 1] = ingotOf(e)
+        end
+        list[#list + 1] = {
+            tag = "汇总·锭→金剑",
+            outs = { item("minecraft:golden_sword", 1) },
+            ins = ins1,
+        }
+        local ins2 = {}
+        for _, e in ipairs(CI_ITEMS) do
+            ins2[#ins2 + 1] = cellOf(e)
+        end
+        ins2[#ins2 + 1] = item("minecraft:golden_sword", 1)
+        ins2[#ins2 + 1] = item("minecraft:iron_sword", 1)
+        list[#list + 1] = {
+            tag = "汇总·单元+剑→钻石剑",
+            outs = { item("minecraft:diamond_sword", 1) },
+            ins = ins2,
+        }
+    elseif which == "refill" then
+        local ins = {}
+        for _, e in ipairs(CI_ITEMS) do
+            ins[#ins + 1] = fluid(e.plasma, 1296)
+        end
+        list[1] = {
+            tag = "磁物质补货",
+            outs = { { name = "minecraft:fish", size = 1, damage = 0, rename = "磁物质等离子补货" } },
+            ins = ins,
+        }
+    end
+    return list
+end
+local function runList(ctx, ifaces, list, db)
+    local total = #list
+    local idx = 1
+    local nOk, nErr = 0, 0
+    ctx.clear()
+    ctx.write(string.format("共 %d 个样板，分批写入", total))
+    ctx.write("每批写满当前所有占位样板后暂停，换好再继续")
+    ctx.write("")
+    while idx <= total do
+        local slots = usedSlots(ifaces)
+        if #slots == 0 then
+            if not ctx.select then
+                ctx.write("没有可写的样板槽")
+                return false
+            end
+            local go = ctx.select({
+                { label = "已放好，继续", value = true },
+                { label = "退出", value = false },
+            }, {
+                title = string.format("接口里没有占位样板（还剩 %d 个没写）", total - idx + 1),
+                footer = "把占位样板放进接口，再选「已放好，继续」",
+            })
+            if not go then return true end
+        else
+            local batch = math.min(#slots, total - idx + 1)
+            for j = 1, batch do
+                local w = list[idx + j - 1]
+                local err = writeOne(slots[j], w, db)
+                if err then
+                    nErr = nErr + 1
+                    ctx.write(string.format("  [%d] %s 失败: %s", idx + j - 1, w.tag, err))
+                else
+                    nOk = nOk + 1
+                end
+                os.sleep(0)
+            end
+            idx = idx + batch
+            if idx <= total then
+                local go = true
+                if ctx.select then
+                    go = ctx.select({
+                        { label = "已换好，继续", value = true },
+                        { label = "退出", value = false },
+                    }, {
+                        title = string.format("已写 %d/%d，还剩 %d 个", idx - 1, total, total - idx + 1),
+                        footer = "把这批样板拿走、放新的占位样板，再选「已换好，继续」",
+                    })
+                elseif ctx.pause then
+                    ctx.pause("把这批样板拿走、放新的占位样板，按任意键继续")
+                end
+                if not go then return true end
+            end
+        end
+    end
+    ctx.write("")
+    ctx.write(string.format("完成：成功 %d，失败 %d", nOk, nErr))
+    if ctx.pause then ctx.pause("") end
+    return nErr == 0
+end
+local function menu(ctx, items, title)
+    return ctx.select(items, { title = title })
+end
+function M.run(ctx, args)
+    local ifaces = findIfaces()
+    if #ifaces == 0 then
+        say(ctx, "找不到ME接口", "检查适配器是否紧贴 ME 接口")
+        return false
+    end
+    local slots = usedSlots(ifaces)
+    if #slots == 0 then
+        say(ctx, "接口里没有样板", "先往接口里塞占位样板，工具只覆盖已有样板的槽")
+        return false
+    end
+    local pick = menu(ctx, {
+        { label = "皮米电路", desc = "NAC · 31 项输入", value = "nac:1" },
+        { label = "量子电路", desc = "NAC · 36 项输入", value = "nac:2" },
+        { label = "神锻等离子样板", desc = "94 种 → 等离子", value = "plasma" },
+        { label = "夸克 · 发配样板", desc = "粉+1296 / 气体+1000 → 单元", value = "quark:fapei" },
+        { label = "夸克 · 汇总下单", desc = "80 单元 ×2e9 → 铁剑", value = "quark:sum" },
+        { label = "夸克 · 等离子补货", desc = "80 等离子×权重 → 生鳕鱼", value = "quark:refill" },
+        { label = "磁物质 · 发配样板", desc = "14 种材料 + 富快子捆绑", value = "ci:fapei" },
+        { label = "磁物质 · 纯粉发配", desc = "14 种粉 → 对应锭", value = "ci:powder" },
+        { label = "磁物质 · 汇总下单", desc = "2 个：锭→金剑 / 单元→钻石剑", value = "ci:sum" },
+        { label = "磁物质 · 等离子补货", desc = "14 等离子 → 生鳕鱼", value = "ci:refill" },
+    }, string.format("样板生成：%d 个接口 / %d 个可用槽", #ifaces, #slots))
+    if not pick then return true end
+    local group, key = pick:match("^([^:]+):(.+)$")
+    local list
+    if group == "nac" then
+        local idx = tonumber(key)
+        local renameTo = nil
+        local hasRename = false
+        for _, e in ipairs(RECIPES[idx].ins) do
+            if e.rename then hasRename = true end
+        end
+        if hasRename then
+            ctx.clear()
+            ctx.write("重命名物品")
+            ctx.write("")
+            ctx.write("这个样板里有几个物品需要统一改名，输入名字就行。")
+            ctx.write("回车确定，留空则用原名")
+            ctx.write("")
+            renameTo = ctx.ask("名字> ", "")
+            if renameTo == "" then renameTo = nil end
+            ctx.clear()
+        end
+        list = genNAC(idx, renameTo)
+    elseif pick == "plasma" then
+        list = genPlasma()
+    elseif group == "quark" then
+        list = genQuark(key)
+    elseif group == "ci" then
+        list = genCI(key)
+    end
+    if not list or #list == 0 then return true end
+    local db = findDb()
+    if (group == "quark" or group == "ci") and not db then
+        local needRename = false
+        for _, w in ipairs(list) do
+            for _, o in ipairs(w.outs) do
+                if o.rename then needRename = true end
+            end
+            for _, e in ipairs(w.ins) do
+                if e.rename then needRename = true end
+            end
+        end
+        if needRename then
+            say(ctx, "需在适配器中放入数据库升级", "要写重命名物品，需在适配器中放入数据库升级")
+            return false
+        end
+    end
+    return runList(ctx, ifaces, list, db)
+end
+return M
+]====],
+    ["/home/tools/_template.lua"] = [====[
+local M = {
+    id = "my-tool",              -- 命令用的短名，和文件名一致最省事
+    name = "我的工具",            -- 菜单里显示的名字（中文短一点，12 格内好看）
+    group = "其他",               -- 菜单分组，同一组会排在一起
+    order = 100,                  -- 组内排序，小的在前（随意）
+    desc = "一句话说明这是干嘛的",   -- 菜单里跟在名字后面的说明
+}
+function M.check(ctx)
+    return true, "环境正常"
+end
+function M.run(ctx, args)
+    args = args or {}
+    ctx.clear()
+    ctx.title("我的工具")
+    ctx.write("这里是工具的输出")
+    ctx.write("")
+    local v = ctx.ask("输入点什么（直接回车跳过）> ", "默认值")
+    ctx.write("你给了：" .. tostring(v))
+    ctx.write("")
+    for i2 = 1, 3 do
+        ctx.write(string.format("  第 %d 步……", i2))
+        os.sleep(0)
+    end
+    ctx.write("")
+    ctx.pause("做完了。")
+    return true
+end
+return M
+]====],
+}
+-- ==== EMBEDDED-END ====
+local STAMP = TOOL_DIR .. "/.installed"
+local function embedFingerprint()
+    local n = 0
+    for path, body in pairs(EMBEDDED) do
+        n = n + #path + #body
+    end
+    return tostring(n)
+end
+local function bootstrapTools()
+    local fp = embedFingerprint()
+    local old = ""
+    local okR = pcall(function()
+        local fh = io.open(STAMP, "r")
+        if not fh then return end
+        old = fh:read("*a") or ""
+        fh:close()
+    end)
+    if not okR then old = "" end
+    old = old:gsub("%s+$", "")
+    local missing = 0
+    for path in pairs(EMBEDDED) do
+        if not fs.exists(path) then missing = missing + 1 end
+    end
+    if missing == 0 and old == fp then
+        return false, 0
+    end
+    if not fs.isDirectory(TOOL_DIR) then
+        pcall(function() fs.makeDirectory(TOOL_DIR) end)
+    end
+    local n = 0
+    for path, body in pairs(EMBEDDED) do
+        local ok, f = pcall(io.open, path, "w")
+        if ok and f then
+            f:write(body)
+            f:close()
+            local chk = io.open(path, "r")
+            local back = chk and chk:read("*a") or ""
+            if chk then chk:close() end
+            if back == body then n = n + 1 end
+        end
+    end
+    local ok2, sf = pcall(io.open, STAMP, "w")
+    if ok2 and sf then
+        sf:write(fp)
+        sf:close()
+    end
+    return n > 0, n
+end
+local function loadTools()
+    local list, bad = {}, {}
+    if not fs.isDirectory(TOOL_DIR) then
+        return list, bad, "目录不存在：" .. TOOL_DIR
+    end
+    for file in fs.list(TOOL_DIR) do
+        local name = tostring(file)
+        if name ~= "." and name ~= ".." and name:sub(1, 1) ~= "_" and name:sub(-4) == ".lua" then
+            local path = TOOL_DIR .. "/" .. name
+            local ok, mod = pcall(function()
+                local chunk = loadfile(path)
+                if not chunk then return nil end
+                return chunk()
+            end)
+            if ok and type(mod) == "table" and type(mod.run) == "function" then
+                mod._file = name
+                mod.id = mod.id or name:sub(1, -5)
+                mod.name = mod.name or mod.id
+                mod.group = mod.group or "其他"
+                mod.order = tonumber(mod.order) or 100
+                list[#list + 1] = mod
+            else
+                bad[#bad + 1] = { file = name, err = tostring(mod) }
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.group ~= b.group then return a.group < b.group end
+        if a.order ~= b.order then return a.order < b.order end
+        return a.name < b.name
+    end)
+    return list, bad
+end
+local HITS = {}
+local function put(x, y, text, fgRole, bgRole)
+    if y < 1 or y > H or x > W then return end
+    term.setCursor(x, y)
+    useFg(fgRole or "text")
+    useBg(bgRole or "canvas")
+    term.write(fit(text, W - x + 1))
+end
+local function hook(x, y, text, action)
+    HITS[#HITS + 1] = { x1 = x, x2 = x + ulen(text) - 1, y = y, action = action }
+end
+local function hitAt(x, y)
+    for _, h in ipairs(HITS) do
+        local y1 = h.y1 or h.y
+        local y2 = h.y2 or h.y
+        if y >= y1 and y <= y2 and x >= h.x1 and x <= h.x2 then
+            return h.action
+        end
+    end
+    return nil
+end
+local function drawCard(x, y, w, h, t, isSel)
+    local bg = isSel and "selected" or "surface"
+    local bd = isSel and "borderOn" or "border"
+    useBg(bg)
+    useFg("text")
+    for r = 0, h - 1 do
+        term.setCursor(x, y + r)
+        term.write(string.rep(" ", w))
+    end
+    useFg(bd)
+    useBg(bg)
+    term.setCursor(x, y)
+    term.write("┌" .. string.rep("─", w - 2) .. "┐")
+    for r = 1, h - 2 do
+        term.setCursor(x, y + r); term.write("│")
+        term.setCursor(x + w - 1, y + r); term.write("│")
+    end
+    term.setCursor(x, y + h - 1)
+    term.write("└" .. string.rep("─", w - 2) .. "┘")
+    local inner = w - 4
+    put(x + 2, y + 1, t.name, isSel and "accent" or "text", bg)
+    local descLines = wrapText(t.desc or "", inner, h - 3)
+    for k, ln in ipairs(descLines) do
+        put(x + 2, y + 1 + k, ln, "muted", bg)
+    end
+    return inner
+end
+local function makeCtx(opts)
+    opts = opts or {}
+    local ctx
+    local function resetScreen()
+        term.setCursorBlink(false)
+        term.clear()
+        term.setCursor(1, 1)
+        lastFg, lastBg = nil, nil
+        useBg("canvas")
+        HITS = {}
+    end
+    local function doSelect(items, o)
+        o = o or {}
+        local sel = tonumber(o.default) or 1
+        local head = o.title or "请选择"
+        local foot = o.footer or "点一下选中   ↑↓ 移动   Enter 确定   Q 返回（别按 Esc，那是游戏菜单）"
+        local top = o.top or 3
+        local bottom = H - 2
+        while true do
+            if ctx then ctx.hadSelect = true end
+            resetScreen()
+            put(1, 1, "  " .. head, "accent", "surface")
+            put(1, 2, string.rep("-", W), "border", "canvas")
+            local y = top
+            for i2, it in ipairs(items) do
+                if y + 1 > bottom then break end
+                local isSel = (i2 == sel)
+                local bg = isSel and "selected" or "canvas"
+                term.setCursor(1, y)
+                useBg(bg)
+                pcall(function() term.clearLine() end)
+                local mark = isSel and "> " or "  "
+                put(1, y, mark .. tostring(it.label or ""), isSel and "accent" or "text", bg)
+                if it.desc and tostring(it.desc) ~= "" then
+                    local d = tostring(it.desc)
+                    local dx = math.floor(W / 2)
+                    if dx > ulen(mark .. tostring(it.label or "")) + 2 then
+                        put(dx, y, d, "muted", bg)
+                    end
+                end
+                term.setCursor(1, y + 1)
+                useBg(bg)
+                pcall(function() term.clearLine() end)
+                HITS[#HITS + 1] = {
+                    x1 = 1, x2 = W, y1 = y, y2 = y + 1,
+                    action = { kind = "pick", idx = i2 },
+                }
+                y = y + 2
+            end
+            put(1, H - 1, string.rep("-", W), "border", "canvas")
+            local btxt = "[ 返回 ]"
+            put(1, H, btxt, "muted", "surface")
+            HITS[#HITS + 1] = { x1 = 1, x2 = ulen(btxt), y1 = H, y2 = H,
+                                action = { kind = "back" } }
+            put(ulen(btxt) + 2, H, foot, "muted", "canvas")
+            term.setCursor(1, H)
+            local ev, a, b = waitInput()
+            if ev == "touch" then
+                local act = hitAt(a, b)
+                if act and act.kind == "pick" then
+                    local it = items[act.idx]
+                    if it then return it.value, it end
+                elseif act and act.kind == "back" then
+                    return nil
+                end
+            elseif ev == "key_down" then
+                local ch, code = a, b
+                if code == 200 then
+                    sel = math.max(1, sel - 1)
+                elseif code == 208 then
+                    sel = math.min(#items, sel + 1)
+                elseif code == 28 then
+                    local it = items[sel]
+                    if it then return it.value, it end
+                elseif ch == 113 or ch == 81 then
+                    return nil
+                elseif ch and ch >= 49 and ch <= 57 then
+                    local n2 = tonumber(string.char(ch))
+                    if n2 and items[n2] then return items[n2].value, items[n2] end
+                end
+            end
+        end
+    end
+    local function doPrompt(question, default, hint)
+    local buf = ""
+    while true do
+        resetScreen()
+        HITS = {}
+        put(1, 1, "  " .. tostring(question), "accent", "surface")
+        put(1, 2, string.rep("-", W), "border", "canvas")
+        local shown = (buf ~= "") and buf or "（还没输入，直接回车就用默认）"
+        put(1, 4, "  当前：" .. shown, "text", "canvas")
+        put(1, 5, "  回车 = 用 " .. (default ~= nil and ("「" .. tostring(default) .. "」") or "空"),
+            "muted", "canvas")
+        put(1, H - 1, string.rep("-", W), "border", "canvas")
+        local bx = 1
+        local function btn(label, act, fg)
+            local txt = "[ " .. label .. " ]"
+            put(bx, H, txt, fg or "accent", "surface")
+            HITS[#HITS + 1] = { x1 = bx, x2 = bx + ulen(txt) - 1, y1 = H, y2 = H, action = act }
+            bx = bx + ulen(txt) + 1
+        end
+        btn("确定", { kind = "ok" })
+        btn("取消", { kind = "cancel" }, "muted")
+        put(bx + 1, H, "  打字输入，Enter 或点「确定」提交", "muted", "canvas")
+        term.setCursorBlink(true)
+        term.setCursor(1 + ulen("  当前：") + ulen(shown) + 1, 4)
+        local ev, a, b = waitInput()
+        if ev == "touch" then
+            local act = hitAt(a, b)
+            if act then
+                term.setCursorBlink(false)
+                if act.kind == "ok" then
+                    if buf ~= "" then return buf end
+                    return default
+                elseif act.kind == "cancel" then
+                    return nil
+                end
+            end
+        elseif ev == "key_down" then
+            local ch, code = a, b
+            if code == 28 then
+                term.setCursorBlink(false)
+                if buf ~= "" then return buf end
+                return default
+            elseif code == 14 then
+                if #buf > 0 then buf = buf:sub(1, #buf - 1) end
+            elseif ch and ch >= 32 and ch < 127 then
+                if #buf < 40 then buf = buf .. string.char(ch) end
+            end
+        end
+    end
+end
+local function doConfirm(question, yesHint, noHint)
+        local v = doSelect({
+            { label = yesHint or "确定", value = true },
+            { label = noHint or "取消", value = false },
+        }, {
+            title = question,
+            default = 1,
+            footer = "点按钮选择   ↑↓ 移动   Enter 确定   Q = 取消",
+        })
+        return v == true
+    end
+    local function doCardSelect(items, o)
+        o = o or {}
+        local sel = 1
+        local head = o.title or "请选择"
+        local cw = math.min(60, W - 6)
+        local ch = 4
+        while true do
+            resetScreen()
+            HITS = {}
+            put(1, 1, "  " .. head, "accent", "surface")
+            put(1, 2, string.rep("─", W), "border", "canvas")
+            for i, it in ipairs(items) do
+                local y = 4 + (i - 1) * (ch + 1)
+                if y + ch - 1 <= H - 2 then
+                    drawCard(3, y, cw, ch,
+                        { name = tostring(it.label or ""), desc = tostring(it.desc or "") }, i == sel)
+                    HITS[#HITS + 1] = {
+                        x1 = 3, x2 = 3 + cw - 1, y1 = y, y2 = y + ch - 1,
+                        action = { kind = "pick", idx = i },
+                    }
+                end
+            end
+            put(1, H - 1, string.rep("─", W), "border", "canvas")
+            local btxt = "[ 返回 ]"
+            put(1, H, btxt, "muted", "surface")
+            HITS[#HITS + 1] = { x1 = 1, x2 = ulen(btxt), y1 = H, y2 = H, action = { kind = "back" } }
+            put(ulen(btxt) + 2, H, "↑↓ 选择   Enter 确定   Q 返回", "muted", "canvas")
+            local ev, a, b = waitInput()
+            if ev == "touch" then
+                local act = hitAt(a, b)
+                if act and act.kind == "pick" then
+                    local it = items[act.idx]
+                    if it then return it.value or it.label, it end
+                elseif act and act.kind == "back" then
+                    return nil
+                end
+            elseif ev == "key_down" then
+                local ch2, code = a, b
+                if code == 200 then
+                    sel = math.max(1, sel - 1)
+                elseif code == 208 then
+                    sel = math.min(#items, sel + 1)
+                elseif code == 28 then
+                    local it = items[sel]
+                    if it then return it.value or it.label, it end
+                elseif ch2 == 113 or ch2 == 81 then
+                    return nil
+                end
+            end
+        end
+    end
+    ctx = {
+        term = term,
+        event = event,
+        component = component,
+        width = W,
+        height = H,
+        clear = function()
+            resetScreen()
+        end,
+        write = function(s2)
+            useFg("text")
+            term.write(fit(s2, W))
+            term.write("\n")
+        end,
+        writeRaw = function(s2)
+            term.write(fit(s2, W))
+        end,
+        ask = function(prompt, default)
+            if prompt then term.write(fit(prompt, W)) end
+            local ok, line2 = pcall(function() return term.read() end)
+            if not ok or line2 == nil or line2 == "" then return default end
+            return line2
+        end,
+        pause = function(msg)
+            if msg then term.write(fit(msg, W)) end
+            term.write(fit("按任意键继续……", W))
+            waitInput()
+        end,
+        title = function(s2)
+            local x, y = term.getCursor()
+            put(1, 1, "  " .. tostring(s2), "accent", "surface")
+            term.setCursor(x, y)
+        end,
+        select = doSelect,
+        prompt = doPrompt,
+        confirm = doConfirm,
+        cardSelect = doCardSelect,
+        hr = function(y)
+            put(1, y, string.rep("-", W), "border", "canvas")
+        end,
+        line = function(x, y, s2, fgRole, bgRole)
+            put(x or 1, y, s2, fgRole, bgRole)
+        end,
+    }
+    return ctx
+end
+local COLS = 2
+local CARD_H = 5
+local function drawMenu(tools, bad, sel, scroll, status)
+    term.setCursorBlink(false)
+    HITS = {}
+    term.clear()
+    lastFg, lastBg = nil, nil
+    useBg("canvas")
+    local total = tostring(#tools) .. " 个工具"
+    put(1, 1, "  工具箱", "accent", "canvas")
+    put(1 + ulen("  工具箱") + 1, 1, "v" .. VERSION, "muted", "canvas")
+    put(W - ulen(total), 1, total, "muted", "canvas")
+    put(1, 2, string.rep("─", W), "border", "canvas")
+    local top = 4
+    local bottom = H - 3
+    local gapX = 2
+    local cw = math.floor((W - gapX * (COLS + 1)) / COLS)
+    if cw < 16 then cw = 16 end
+    local stepY = CARD_H + 1
+    local rowsVisible = math.max(1, math.floor((bottom - top + 1) / stepY))
+    if #tools == 0 then
+        put(2, top, "一个工具都没有", "warn", "canvas")
+        put(2, top + 1, "把 .lua 工具文件放进 " .. TOOL_DIR .. "/", "muted", "canvas")
+        put(2, top + 2, "或者删掉主程序重新下载（它会自动补齐）", "muted", "canvas")
+    else
+        for i, t in ipairs(tools) do
+            local slot = i - 1 - scroll * COLS
+            local row = math.floor(slot / COLS)
+            local col = slot % COLS
+            if row >= 0 and row < rowsVisible then
+                local x = 1 + gapX + col * (cw + gapX)
+                local y = top + row * stepY
+                drawCard(x, y, cw, CARD_H, t, i == sel)
+                HITS[#HITS + 1] = {
+                    x1 = x, x2 = x + cw - 1,
+                    y1 = y, y2 = y + CARD_H - 1,
+                    action = { kind = "tool", idx = i },
+                }
+            end
+        end
+    end
+    if #bad and #bad > 0 then
+        put(1, H - 2, fit(string.format("  !! %d 个工具加载失败：%s", #bad, bad[1].file), W),
+            "error", "canvas")
+    elseif status and status ~= "" then
+        put(1, H - 2, "  " .. status, "warn", "canvas")
+    else
+        put(1, H - 2, string.rep("─", W), "border", "canvas")
+    end
+    local bx = 1
+    local function button(label, act, fgRole)
+        local txt = "[ " .. label .. " ]"
+        put(bx, H - 1, txt, fgRole or "accent", "surface")
+        HITS[#HITS + 1] = { x1 = bx, x2 = bx + ulen(txt) - 1, y1 = H - 1, y2 = H - 1, action = act }
+        bx = bx + ulen(txt) + 1
+    end
+    button("运行", { kind = "run" })
+    button("重扫", { kind = "rescan" })
+    button("退出", { kind = "quit" }, "muted")
+    put(bx + 1, H - 1, "↑↓←→ 选择   回车运行   也可直接点卡片", "muted", "canvas")
+    term.setCursor(1, H - 1)
+end
+local function menuHeight(tools)
+    local h2, lastG = 0, nil
+    for i3 = 1, #tools do
+        if tools[i3].group ~= lastG then
+            lastG = tools[i3].group
+            h2 = h2 + 1
+        end
+        h2 = h2 + 1
+    end
+    return h2
+end
+local function runMenu(tools, bad)
+    local sel, scroll = 1, 0
+    local status = ""
+    local function runOne(t)
+        term.setCursorBlink(false)
+        term.clear()
+        term.setCursor(1, 1)
+        local ctx = makeCtx()
+        local ok, err = pcall(t.run, ctx, {})
+        if not ok then
+            term.setCursor(1, H)
+            term.write(fit("!! 工具出错：" .. tostring(err), W))
+            term.setCursor(1, H)
+            term.write(fit("[按任意键返回菜单]", W))
+            waitInput()
+        elseif not ctx.hadSelect then
+            term.setCursor(1, H)
+            term.write(fit("[按任意键返回菜单]", W))
+            waitInput()
+        end
+    end
+    while true do
+        local top, bottom = 4, H - 3
+        local stepY = CARD_H + 1
+        local rowsVisible = math.max(1, math.floor((bottom - top + 1) / stepY))
+        local selRow = math.floor((sel - 1) / COLS)
+        if selRow < scroll then scroll = selRow end
+        if selRow >= scroll + rowsVisible then scroll = selRow - rowsVisible + 1 end
+        if scroll < 0 then scroll = 0 end
+        drawMenu(tools, bad, sel, scroll, status)
+        status = ""
+        local ev, a, b = waitInput()
+        if ev == "touch" then
+            local act = hitAt(a, b)
+            if act then
+                if act.kind == "tool" then
+                    if act.idx == sel then
+                        local t = tools[sel]
+                        if t then runOne(t) end
+                    else
+                        sel = act.idx
+                    end
+                elseif act.kind == "run" then
+                    local t = tools[sel]
+                    if t then runOne(t) end
+                elseif act.kind == "rescan" then
+                    tools, bad = loadTools()
+                    if sel > #tools then sel = math.max(1, #tools) end
+                    status = string.format("已重扫：%d 个工具", #tools)
+                elseif act.kind == "quit" then
+                    term.clear()
+                    term.setCursor(1, 1)
+                    return
+                end
+            end
+        elseif ev == "key_down" then
+            local ch, code = a, b
+            if code == 200 then
+                if sel - COLS >= 1 then sel = sel - COLS end
+            elseif code == 208 then
+                if sel + COLS <= #tools then sel = sel + COLS end
+            elseif code == 203 then
+                if (sel - 1) % COLS > 0 then sel = sel - 1 end
+            elseif code == 205 then
+                if (sel - 1) % COLS < COLS - 1 and sel < #tools then sel = sel + 1 end
+            elseif code == 28 then
+                local t = tools[sel]
+                if t then runOne(t) end
+            elseif ch == 113 or ch == 81 then
+                term.clear()
+                term.setCursor(1, 1)
+                return
+            elseif ch and ch >= 49 and ch <= 57 then
+                local want = tonumber(string.char(ch))
+                if want and want <= #tools then sel = want end
+            end
+        end
+    end
+end
+local function cliCtx()
+    return {
+        term = term,
+        event = event,
+        component = component,
+        width = 1000,
+        height = 1000,
+        clear = function() end,
+        write = function(s) print(tostring(s)) end,
+        writeRaw = function(s) io.write(tostring(s)) end,
+        ask = function(prompt, default)
+            if prompt then io.write(tostring(prompt)) end
+            local line = io.read()
+            if line == nil or line == "" then return default end
+            return line
+        end,
+        pause = function(msg)
+            if msg then print(tostring(msg)) end
+        end,
+        title = function(s) print(tostring(s)) end,
+    }
+end
+local function showAbout(tools, bad)
+    local nEmb, nEmbTools = 0, 0
+    for path in pairs(EMBEDDED) do
+        nEmb = nEmb + 1
+        local name = tostring(path):match("([^/]+)$") or ""
+        if name:sub(1, 1) ~= "_" then nEmbTools = nEmbTools + 1 end
+    end
+    print("工具箱 " .. VERSION)
+    print("")
+    print(string.format("主程序内嵌工具 : %d 个", nEmb))
+    print("工具目录       : " .. TOOL_DIR)
+    print(string.format("实际加载工具   : %d 个", #tools))
+    for _, t in ipairs(tools) do
+        print(string.format("   %-18s %s", t.id, t.name))
+    end
+    if #bad > 0 then
+        print("")
+        print("加载失败：")
+        for _, b in ipairs(bad) do print("   " .. b.file .. " —— " .. b.err) end
+    end
+    print("")
+    print("版本指纹       : " .. embedFingerprint())
+    print("")
+    if nEmb == 0 then
+        print("!! 这个主程序里没有内嵌工具——你跑的很可能是旧版文件")
+        print("   重新下载最新的 toolbox 覆盖 /home/bin/toolbox")
+    elseif nEmbTools ~= #tools then
+        print("!! 内嵌 " .. nEmbTools .. " 个工具，但只加载到 " .. #tools .. " 个，可能有工具写失败了")
+    else
+        print("看起来正常。")
+    end
+end
+local function runDiag()
+    term.setCursorBlink(true)
+    term.clear()
+    term.setCursor(1, 1)
+    print("事件诊断")
+    print("----------------------------------------")
+    print("现在按方向键、回车，或点屏幕，下面会实时显示收到的事件。")
+    print("按 Q 退出。")
+    print("如果这里什么都没出现，说明按键事件根本没到这台电脑：")
+    print("  检查键盘是不是贴着屏幕、键盘有没有插好。")
+    print("----------------------------------------")
+    local n = 0
+    while true do
+        local e = { event.pull() }
+        local name = tostring(e[1])
+        n = n + 1
+        if name == "key_down" then
+            local ch, code = e[3], e[4]
+            local chs = "无"
+            if ch and ch >= 32 and ch < 127 then chs = string.char(ch) end
+            print(string.format("#%-3d key_down   字符=%s  键码=%s", n, chs, tostring(code)))
+            if ch == 113 or ch == 81 then break end
+        elseif name == "touch" then
+            print(string.format("#%-3d touch      列=%s  行=%s", n, tostring(e[3]), tostring(e[4])))
+        elseif name ~= "timer" then
+            print(string.format("#%-3d %s", n, name))
+        else
+            n = n - 1
+        end
+        if n > 300 then
+            print("事件太多，先停下。")
+            break
+        end
+    end
+    term.setCursorBlink(true)
+    print("")
+    print("诊断结束。")
+end
+local function printList(tools, bad)
+    print("工具箱 v" .. VERSION .. " —— 工具目录 " .. TOOL_DIR)
+    print("")
+    if #tools == 0 then
+        print("（没有工具）")
+    else
+        local lastGroup = nil
+        for _, t in ipairs(tools) do
+            if t.group ~= lastGroup then
+                lastGroup = t.group
+                print("[" .. t.group .. "]")
+            end
+            print(string.format("  %-16s %s", t.id, t.name))
+            if t.desc then
+                print("      " .. t.desc)
+            end
+        end
+    end
+    if #bad and #bad > 0 then
+        print("")
+        print("以下工具加载失败：")
+        for _, b in ipairs(bad) do
+            print("  " .. b.file .. " —— " .. b.err)
+        end
+    end
+end
+local argv = { ... }
+local cmd = argv[1]
+local booted, nBoot = bootstrapTools()
+local tools, bad, dirErr = loadTools()
+if booted and nBoot > 0 then
+    print(string.format("首次运行：已自动补齐 %d 个工具文件到 %s", nBoot, TOOL_DIR))
+end
+if cmd == "diag" then
+    runDiag()
+    return
+end
+if cmd == "about" or cmd == "version" or cmd == "-v" then
+    showAbout(tools, bad)
+    return
+end
+if cmd == "list" or cmd == "-l" then
+    printList(tools, bad)
+    return
+end
+if cmd and cmd ~= "" then
+    local target = nil
+    for _, t in ipairs(tools) do
+        if t.id == cmd then target = t break end
+    end
+    if not target then
+        print("没有这个工具：" .. cmd)
+        print("")
+        printList(tools, bad)
+        return
+    end
+    local args = {}
+    for i2 = 2, #argv do args[#args + 1] = argv[i2] end
+    local ctx = cliCtx()
+    local ok, err = pcall(target.run, ctx, args)
+    if not ok then
+        print("")
+        print("!! 工具出错：" .. tostring(err))
+    end
+    return
+end
+if not component.isAvailable("gpu") then
+    if dirErr then print(dirErr) end
+    printList(tools, bad)
+    print("")
+    print("用法： toolbox               进菜单（需要屏幕）")
+    print("       toolbox about         看版本、内嵌几个工具、实际装了哪些")
+    print("       toolbox diag          按键/鼠标事件诊断（按了没反应时用）")
+    print("       toolbox list          列出工具")
+    print("       toolbox <工具id> [参数] 直接运行")
+    return
+end
+if dirErr then
+    print(dirErr)
+    print("先建目录： mkdir " .. TOOL_DIR)
+    return
+end
+runMenu(tools, bad)
