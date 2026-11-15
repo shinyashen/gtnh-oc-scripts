@@ -1,0 +1,58 @@
+name: mirror-upstream
+
+# 自动同步两类上游副本,供仓库内直接对照,无需手动搬运:
+# 1. upstream/  —— GitHub 上游仓库的脚本文件(GitHub raw / 整仓快照)
+# 2. wiki/      —— GTNH 中文维基(灰机wiki)页内 <syntaxhighlight lang="lua"> 代码块
+# 提交者为 github-actions[bot](自动提交不携带个人 GPG 签名)。
+
+on:
+  schedule:
+    - cron: '0 12 * * 1'   # 每周一 UTC 12:00(北京时间周一 20:00),无特殊含义
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream SHAs
+        run: |
+          XTX_DEF=$(curl -fsSL https://api.github.com/repos/Yecgaa1/xtxChino_GTNH_OC | jq -r .default_branch)
+          NC_DEF=$(curl -fsSL https://api.github.com/repos/ljhljll/GTNH-NuclearCooler | jq -r .default_branch)
+          XTX_SHA=$(curl -fsSL https://api.github.com/repos/Yecgaa1/xtxChino_GTNH_OC/commits/$XTX_DEF | jq -r .sha)
+          NC_SHA=$(curl -fsSL https://api.github.com/repos/ljhljll/GTNH-NuclearCooler/commits/$NC_DEF | jq -r .sha)
+          echo "XTX_SHA=$XTX_SHA" >> "$GITHUB_ENV"
+          echo "NC_SHA=$NC_SHA" >> "$GITHUB_ENV"
+
+      - name: Fetch upstream scripts (xtxChino_GTNH_OC, GPL-3.0)
+        run: |
+          curl -fsSL -A "Mozilla/5.0" -o src/blood-altar/upstream/blood.lua \
+            https://raw.githubusercontent.com/Yecgaa1/xtxChino_GTNH_OC/main/blood.lua
+          curl -fsSL -A "Mozilla/5.0" -o src/wireless-eu-monitor/upstream/wireless-powerd.lua \
+            https://raw.githubusercontent.com/Yecgaa1/xtxChino_GTNH_OC/main/fork/wireless-powerd.lua
+
+      - name: Fetch upstream repo (GTNH-NuclearCooler)
+        run: |
+          git clone --depth 1 https://github.com/ljhljll/GTNH-NuclearCooler /tmp/nc
+          rm -rf src/nuclear-cooler/upstream
+          mkdir -p src/nuclear-cooler/upstream
+          tar -C /tmp/nc --exclude=.git -cf - . | tar -C src/nuclear-cooler/upstream -xf -
+
+      - name: Sync wiki embedded scripts
+        run: python3 scripts/wiki_sync.py
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "upstream unchanged"
+          else
+            git commit -m "chore(mirror): sync upstream & wiki (xtxChino@${XTX_SHA:-?}, NuclearCooler@${NC_SHA:-?})"
+            git push
+          fi

@@ -1,0 +1,16 @@
+OC网络组件清单（流体组件探测失败时自动生成）
+注意：AE2的ME接口(二合一接口)必须紧贴着OC线缆/适配器才会被扫描到
+level_maintainer x5
+internet x1
+gt_machine x4
+keyboard x1
+eeprom x1
+gpu x1
+screen x1
+database x1
+computer x1
+me_interface x1
+filesystem x2
+
+接口/控制器类组件的方法列表：
+[me_interface] allItems, clearInterfacePatternInput, clearInterfacePatternOutput, getAvgPowerInjection, getAvgPowerUsage, getCpus, getCraftable, getCraftables, getEssentiaInNetwork, getFluidInNetwork, getFluidsInNetwork, getIdlePowerUsage, getInterfaceConfiguration, getInterfacePattern, getItemInNetwork, getItemsInNetwork, getItemsInNetworkById, getMaxStoredPower, getStoredPower, isEssentiaEventSubscription, isFluidEventSubscription, isItemEventSubscription, setEssentiaEventSubscription, setFluidEventSubscription, setInterfaceConfiguration, setInterfacePatternInput, setInterfacePatternOutput, setItemEventSubscription, store, storeInterfacePatternInput, storeInterfacePatternOutput

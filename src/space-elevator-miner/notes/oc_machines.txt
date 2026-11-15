@@ -1,0 +1,25 @@
+[钻机 #1] 地址:bba19f24-36dc-4e8a-9425-e847268e9d02
+  gt_machine方法: getAverageElectricInput, getAverageElectricOutput, getCoordinates, getEUCapacity, getEUCapacityString, getEUInputAverage, getEUMaxStored, getEUOutputAverage, getEUStored, getInputVoltage, getName, getOutputAmperage, getOutputVoltage, getOwnerName, getParameters, getSensorInformation, getSteamCapacity, getSteamMaxStored, getSteamStored, getStoredEU, getStoredEUString, getStoredSteam, getWorkMaxProgress, getWorkProgress, hasWork, isMachineActive, isWorkAllowed, setParameter, setWorkAllowed
+[采矿机 #1] 地址:474a32a8-79de-4a19-8720-5f7cc916efe1
+  gt_machine方法: getAverageElectricInput, getAverageElectricOutput, getCoordinates, getEUCapacity, getEUCapacityString, getEUInputAverage, getEUMaxStored, getEUOutputAverage, getEUStored, getInputVoltage, getName, getOutputAmperage, getOutputVoltage, getOwnerName, getParameters, getSensorInformation, getSteamCapacity, getSteamMaxStored, getSteamStored, getStoredEU, getStoredEUString, getStoredSteam, getWorkMaxProgress, getWorkProgress, hasWork, isMachineActive, isWorkAllowed, setParameter, setWorkAllowed
+[采矿机 #2] 地址:a3165be7-2e95-498f-b725-e5b1d95e9dc5
+  gt_machine方法: getAverageElectricInput, getAverageElectricOutput, getCoordinates, getEUCapacity, getEUCapacityString, getEUInputAverage, getEUMaxStored, getEUOutputAverage, getEUStored, getInputVoltage, getName, getOutputAmperage, getOutputVoltage, getOwnerName, getParameters, getSensorInformation, getSteamCapacity, getSteamMaxStored, getSteamStored, getStoredEU, getStoredEUString, getStoredSteam, getWorkMaxProgress, getWorkProgress, hasWork, isMachineActive, isWorkAllowed, setParameter, setWorkAllowed
+[钻机参数 #1] tt_machine地址:bba19f24-36dc-4e8a-9425-e847268e9d02
+  [batch] = 1
+  [recipe0.parallel] = 4
+  [recipe0.planetType] = 8
+  [recipe0.gasType] = 5
+[矿机参数 #1] tt_machine地址:474a32a8-79de-4a19-8720-5f7cc916efe1
+  [distance] = 40
+  [cycle] = false
+  [cycleDistance] = 40
+  [step] = 0
+  [parallel] = 4
+  [range] = 0
+[矿机参数 #2] tt_machine地址:a3165be7-2e95-498f-b725-e5b1d95e9dc5
+  [distance] = 40
+  [cycle] = false
+  [cycleDistance] = 40
+  [step] = 5
+  [parallel] = 4
+  [range] = 0
