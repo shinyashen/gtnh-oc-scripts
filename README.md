@@ -24,7 +24,7 @@
 
 `.github/workflows/mirror-upstream.yml` 每周一北京时间 20:00(UTC 周一 12:00,亦可手动触发)自动:
 
-1. 拉取 `Yecgaa1/xtxChino_GTNH_OC` 的 `blood.lua` 到对应组 `upstream/`;
+1. 拉取 `Yecgaa1/xtxChino_GTNH_OC` 的 `blood.lua` 与 `fork/wireless-powerd.lua`(监控上游,已并入 oc-toolbox 组)到对应 `upstream/`;
 2. 拉取 [kAGuyAk gist 45f36eec](https://gist.github.com/kAGuyAk/45f36eeca31fb2fc536a000d5d9d3a80) 最新修订 raw 到 `src/oc-toolbox/upstream/`(commit message 记录 gist 修订号);
 3. 整仓快照 `ljhljll/GTNH-NuclearCooler`(不含 `.git`)到 `src/nuclear-cooler/upstream/`;
 4. 运行 `scripts/wiki_sync.py`:调灰机 wiki 的 MediaWiki API,把三个维基教程页的 `<syntaxhighlight lang="lua">` 代码块搬运到对应组 `wiki/`,并记录页面 `revid`(幂等,页面没改不重复;遇 Cloudflare 人机验证自动跳过该页,不影响其余同步);

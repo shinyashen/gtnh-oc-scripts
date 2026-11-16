@@ -7,7 +7,7 @@ GTNH 中文维基《指南:样板OC工具箱》所引 gist 单文件脚本的**�
 - 维基教程:[指南:样板OC工具箱](https://gtnh.huijiwiki.com/wiki/%E6%8C%87%E5%8D%97:%E6%A0%B7%E6%9D%BFOC%E5%B7%A5%E5%85%B7%E7%AE%B1)(页内只有安装命令,无代码块;作者柳叶刀kk)
 - 上游代码:[kAGuyAk gist 45f36eec](https://gist.github.com/kAGuyAk/45f36eeca31fb2fc536a000d5d9d3a80)(**未声明许可证,版权归作者**;`upstream/gistfile1.txt` 为 Actions 自动同步的最新副本)
 - 本版依据:gist 修订 **`c69ad0e9`**(2026-11-14,即脚本内 `VERSION = "1115-62ddaa"`)
-- 监控功能来自:[维基·指南:基于OC的无线电网监控](https://gtnh.huijiwiki.com/wiki/%E6%8C%87%E5%8D%97:%E5%9F%BA%E4%BA%8EOC%E7%9A%84%E6%97%A0%E7%BA%BF%E7%94%B5%E7%BD%91%E7%9B%91%E6%8E%A7) 页内脚本(= Yecgaa1/xtxChino_GTNH_OC `fork/wireless-powerd.lua` + 6 行分辨率改动)
+- 监控功能来自:[维基·指南:基于OC的无线电网监控](https://gtnh.huijiwiki.com/wiki/%E6%8C%87%E5%8D%97:%E5%9F%BA%E4%BA%8EOC%E7%9A%84%E6%97%A0%E7%BA%BF%E7%94%B5%E7%BD%91%E7%9B%91%E6%8E%A7) 页内脚本(= [Yecgaa1/xtxChino_GTNH_OC](https://github.com/Yecgaa1/xtxChino_GTNH_OC) 的 `fork/wireless-powerd.lua` + 6 行分辨率改动;`upstream/wireless-powerd.lua` 为其 Actions 同步副本,GPL-3.0)
 
 ## 部署结构(OpenOS)
 
@@ -42,8 +42,8 @@ GTNH 中文维基《指南:样板OC工具箱》所引 gist 单文件脚本的**�
    - **分钟聚合持久化** `/home/tools/.eu_log`(≤1440 行 ≈29KB):每运行分钟记录绝对 EU 值,1h/1d 均值与耗尽时间重启即恢复(算法与原秒级窗口在无缺口时精确等价);5s/1m/5m 短窗口仍为秒级。
 4. **接口样板槽位自适应**:GTNH 接口 9/18/27/36 槽四档,`ae2_iface.patternSlotCount` 递增探测并按接口地址缓存(上游全部硬编码 36)。
 5. **通道样板检测 + 引用替换**(`pattern-gen`,2.9 新样板类型,只有输入无输出):
-   - 类型判据:`getInterfacePattern` 返回 outputs 为空 + `isCraftable==false` + inputs≥1;再按 wiki 旧方案**写死内容**匹配——红板=5×32 改名光学贴片(`gregtech:gt.metaitem.03`)+光学电路基板×4,蓝板=5×32 原名光学贴片;写了其他内容的通道样板一律不认。
-   - 配方项按 `(name, damage, hasTag)` 三元组整组对齐,**统一整数倍 k 缩放**(引用×k = 内容×k;皮米=红×1+蓝×1,量子=红×2+蓝×2),对不上则保持原改名写入。
+   - 类型判据:`getInterfacePattern` 返回 outputs 为空 + `isCraftable==false` + inputs≥1;再按 wiki 旧方案**写死内容**匹配——红板=5×32 改名光学贴片(`gregtech:gt.metaitem.03`)+**改名**光学电路基板×4(基板不带命名则整板不认),蓝板=5×32 原名光学贴片;写了其他内容的通道样板一律不认。红/蓝各只认扫描到的第一张。
+   - 配方项按 `(name, damage, hasTag)` 三元组整组对齐——**同一物品的命名/未命名形态各自独立分组**(如未命名光学电路基板项不会被红板的命名基板吸收,保持原名写入),**统一整数倍 k 缩放**(引用×k = 内容×k;皮米=红×1+蓝×1,量子=红×2+蓝×2),对不上则保持原改名写入。皮米/量子配方里基板的注册 id 本就不同(`metaitem.01`/`metaitem.03:32728`),红板基板 id 与某条电路不同时该电路自然不替换,属预期行为。
    - 引用写入靠通道样板物品完整 NBT(`tag` 字段 gzip)无损透传给 `setInterfacePatternInput`,**无需数据库升级改名**(改名项被完全覆盖时跳过改名询问)。前提:config `allowItemStackNBTTags=true`。
    - 通道样板所在槽被排除出占位槽候选,批量写入永不覆写。
 6. **框架切割液选择**(`pattern-gen`):NAC 纳米精度切割仓的框架切割各有两种可选切割液(经中文维基在线 NEI 数据库核对全部 29 条切割配方),生成含框架的样板时询问(每项标注 单框架用量×框架数,Q 保持默认):

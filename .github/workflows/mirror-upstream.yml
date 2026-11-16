@@ -32,6 +32,9 @@ jobs:
         run: |
           curl -fsSL -A "Mozilla/5.0" -o src/blood-altar/upstream/blood.lua \
             https://raw.githubusercontent.com/Yecgaa1/xtxChino_GTNH_OC/main/blood.lua
+          # 无线电网监控上游(已并入 oc-toolbox 作为其菜单工具)
+          curl -fsSL -A "Mozilla/5.0" -o src/oc-toolbox/upstream/wireless-powerd.lua \
+            https://raw.githubusercontent.com/Yecgaa1/xtxChino_GTNH_OC/main/fork/wireless-powerd.lua
 
       - name: Fetch gist (样板OC工具箱, license 未声明)
         run: |
