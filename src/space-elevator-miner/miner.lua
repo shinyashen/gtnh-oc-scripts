@@ -6,7 +6,7 @@ local sleepTime = 30 --检测间隔（秒）
 local pumpBatch = nil  --所有钻机批处理数，nil为不自动设置
 local allowRandomMine = true --库存达标后是否继续随机挖矿
 local printMonitorDetail = false --是否打印监控目标明细
-local version = "v2.3-290适配r14钻机多线程版"
+local version = "v2.3-290适配r15空请求容错版"
 
 -- ====== 流体/物品读取组件自动探测（290：用invoke直调，绕开proxy字段缺陷） ======
 local fluidAddr, fluidName = nil, nil
@@ -309,6 +309,7 @@ local function getMonitoringTargets()
 end
 
 local function printRatio(title, targets, stockRatio)
+    if #targets == 0 then return end --空表时最后一行循环起点会算出负数并索引到 nil，r15 修复
     io.write(title .. "名称：    ")
     local colWidth, perRow = 36, 4
     for i, t in ipairs(targets) do
@@ -442,59 +443,65 @@ while true do
 
     print("==================================\n正在读取监控目标")
     local targets = getMonitoringTargets()
-    print("==================================\n正在读取当前库存")
-    local fluidIdx, fluidMin = nil, nil
-    if fluidAddr then
-        refreshFluidCache()
-        fluidIdx, fluidMin = minIndex(getFluidRatio(targets.fluids))
-    elseif #targets.fluids > 0 then
-        print(string.format("流体监控不可用（组件未绑定），已跳过 %d 个流体目标", #targets.fluids))
-    end
-    local itemIdx, itemMin = minIndex(getItemRatio(targets.items))
-    print(string.format("已检测到钻机数量：%d | 采矿机数量：%d", #pumps, #miners))
-
-    if fluidIdx and targets.fluids[fluidIdx] then
-        if fluidMin < 1 or allowRandomMine then
-            local fluidPara = targets.fluids[fluidIdx].paras
-            if fluidPara ~= preFluidPara then
-                print(string.format("==================================\n正在调整全部钻机至：%s | 行星：%d | 气体：%d",
-                    targets.fluids[fluidIdx].displayName, (fluidPara // 1000) % 100, fluidPara % 1000))
-                stopMachine(pumps)
-                print("正在修改钻机参数", (fluidPara // 1000) % 100, fluidPara % 1000)
-                setPumpParams((fluidPara // 1000) % 100, fluidPara % 1000)
-                for _, pump in ipairs(pumps) do pump.setWorkAllowed(true) end
-                preFluidPara = fluidPara
-            else
-                print(string.format("==================================\n钻机参数无需调整，当前正在采集：%s", targets.fluids[fluidIdx].displayName))
-            end
-        else
-            print("当前流体库存充足，无需启动钻机")
-            stopMachine(pumps)
+    if #targets.items == 0 and #targets.fluids == 0 then
+        --r15：请求器上没有任何启用目标时待机，不再查询库存/调整机器（修复空表导致的 nil 闪退）
+        print("请求器上没有启用的监控目标，待机中（机器保持当前状态，每 " .. sleepTime .. " 秒复查）")
+        preFluidPara, preItemPara = 0, 0
+    else
+        print("==================================\n正在读取当前库存")
+        local fluidIdx, fluidMin = nil, nil
+        if fluidAddr then
+            refreshFluidCache()
+            fluidIdx, fluidMin = minIndex(getFluidRatio(targets.fluids))
+        elseif #targets.fluids > 0 then
+            print(string.format("流体监控不可用（组件未绑定），已跳过 %d 个流体目标", #targets.fluids))
         end
-    end
+        local itemIdx, itemMin = minIndex(getItemRatio(targets.items))
+        print(string.format("已检测到钻机数量：%d | 采矿机数量：%d", #pumps, #miners))
 
-    if itemIdx and targets.items[itemIdx] then
-        if itemMin < 1 or allowRandomMine then
-            local itemPara = targets.items[itemIdx].paras
-            if itemPara ~= preItemPara then
-                -- v2.2编码：无人机等级×1e8 + 距离×1e5 + 超频×1e4
-                local droneLevel = itemPara // 100000000
-                local minerDist = (itemPara // 100000) % 1000
-                local minerOC = (itemPara % 100000) / 10000
-                print(string.format("==================================\n正在调整全部矿机至：%s | 无人机等级：%d | 距离：%d | 超频：%.4f",
-                    targets.items[itemIdx].displayName, droneLevel, minerDist, minerOC))
-                changeDrone(droneLevel)
-                stopMachine(miners)
-                print("正在修改矿机参数 距离:", minerDist, "超频:", minerOC)
-                setMinerParams(minerDist, minerOC)
-                for _, miner in ipairs(miners) do miner.setWorkAllowed(true) end
-                preItemPara = itemPara
+        if fluidIdx and targets.fluids[fluidIdx] then
+            if fluidMin < 1 or allowRandomMine then
+                local fluidPara = targets.fluids[fluidIdx].paras
+                if fluidPara ~= preFluidPara then
+                    print(string.format("==================================\n正在调整全部钻机至：%s | 行星：%d | 气体：%d",
+                        targets.fluids[fluidIdx].displayName, (fluidPara // 1000) % 100, fluidPara % 1000))
+                    stopMachine(pumps)
+                    print("正在修改钻机参数", (fluidPara // 1000) % 100, fluidPara % 1000)
+                    setPumpParams((fluidPara // 1000) % 100, fluidPara % 1000)
+                    for _, pump in ipairs(pumps) do pump.setWorkAllowed(true) end
+                    preFluidPara = fluidPara
+                else
+                    print(string.format("==================================\n钻机参数无需调整，当前正在采集：%s", targets.fluids[fluidIdx].displayName))
+                end
             else
-                print(string.format("==================================\n矿机参数无需调整，当前正在采集：%s", targets.items[itemIdx].displayName))
+                print("当前流体库存充足，无需启动钻机")
+                stopMachine(pumps)
             end
-        else
-            print("当前物品库存充足，无需启动矿机")
-            stopMachine(miners)
+        end
+
+        if itemIdx and targets.items[itemIdx] then
+            if itemMin < 1 or allowRandomMine then
+                local itemPara = targets.items[itemIdx].paras
+                if itemPara ~= preItemPara then
+                    -- v2.2编码：无人机等级×1e8 + 距离×1e5 + 超频×1e4
+                    local droneLevel = itemPara // 100000000
+                    local minerDist = (itemPara // 100000) % 1000
+                    local minerOC = (itemPara % 100000) / 10000
+                    print(string.format("==================================\n正在调整全部矿机至：%s | 无人机等级：%d | 距离：%d | 超频：%.4f",
+                        targets.items[itemIdx].displayName, droneLevel, minerDist, minerOC))
+                    changeDrone(droneLevel)
+                    stopMachine(miners)
+                    print("正在修改矿机参数 距离:", minerDist, "超频:", minerOC)
+                    setMinerParams(minerDist, minerOC)
+                    for _, miner in ipairs(miners) do miner.setWorkAllowed(true) end
+                    preItemPara = itemPara
+                else
+                    print(string.format("==================================\n矿机参数无需调整，当前正在采集：%s", targets.items[itemIdx].displayName))
+                end
+            else
+                print("当前物品库存充足，无需启动矿机")
+                stopMachine(miners)
+            end
         end
     end
 
