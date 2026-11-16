@@ -225,7 +225,7 @@ local RECIPES = {
             { name = "bartworks:gt.bwMetaGeneratedscrew", damage = 10110, size = 2, label = "Enriched Naquadah Alloy Screw" },
             { name = "miscutils:itemBoltRhugnor", damage = 0, size = 8, label = "Rhugnor Bolt" },
             { name = "spatialfluid", size = 250, fluid = true, label = "Spatially Enlarged Fluid" },
-            { name = "gregtech:gt.metaitem.01", damage = 32728, size = 4, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32728, size = 4, rename = true, label = "qq3" },
             { name = "gregtech:gt.metaitem.02", damage = 19154, size = 64, label = "Fine Proto-Halkonite Steel Wire" },
             { name = "gregtech:gt.metaitem.01", damage = 26581, size = 32, label = "Transcendent Metal Bolt" },
             { name = "dimensionallyshiftedsuperfluid", size = 80, fluid = true, label = "Dimensionally Shifted Superfluid" },
