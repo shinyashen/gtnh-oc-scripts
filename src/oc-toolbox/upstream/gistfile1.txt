@@ -3,7 +3,7 @@ local fs = require("filesystem")
 local term = require("term")
 local event = require("event")
 local TOOL_DIR = "/home/tools"
-local VERSION = "1115-62ddaa"
+local VERSION = "1123-383590"
 local W, H = 80, 25
 local gpu = component.gpu
 if gpu then
@@ -666,15 +666,40 @@ local function collectSide(list)
     end
     return out
 end
+local CN_MATERIAL = {
+    ["玄钢"] = "darksteel",
+    ["觉醒龙"] = "draconiumawakened",
+    ["通流琥珀金"] = "electrumflux",
+    ["镀铑钯"] = "rhodium-plated palladium",
+    ["高耐久性复合钢"] = "high durability compound steel",
+    ["精金合金"] = "adamantium alloy",
+    ["富集硅岩合金"] = "enriched naquadah alloy",
+    ["MAR-M200特种钢"] = "mar-m200 steel",
+    ["MAR-Ce-M200特种钢"] = "mar-ce-m200 steel",
+    ["阿瑟锡"] = "artherium-sn",
+    ["MV超导粗胚"] = "pentacadmiummagnesiumhexaoxid",
+    ["高速钢-S"] = "hsss",
+    ["稀有金属合金"] = "precious metals alloy",
+    ["原子分离催化剂"] = "atomic separation catalyst",
+}
 local function materialFromLabel(lb)
     lb = tostring(lb or "")
-    if not lb:find("[Ii]ngot$") then return nil end
-    local mat = lb:gsub("^Hot%s+", "")
-    mat = mat:gsub("%s*[Ii]ngot$", "")
-    mat = mat:lower()
-    mat = mat:gsub("%s+", "")
-    if mat == "" then return nil end
-    return mat
+    if lb:find("[Ii]ngot$") then
+        local mat = lb:gsub("^Hot%s+", "")
+        mat = mat:gsub("%s*[Ii]ngot$", "")
+        mat = mat:lower()
+        mat = mat:gsub("%s+", "")
+        if mat == "" then return nil end
+        return mat
+    end
+    if lb:sub(-3) == "锭" then
+        local mat = lb:gsub("^热", "")
+        mat = mat:gsub("锭$", "")
+        mat = mat:gsub("^%s+", ""):gsub("%s+$", "")
+        if mat == "" then return nil end
+        return CN_MATERIAL[mat]
+    end
+    return nil
 end
 local function ingotMaterial(it, labels)
     local lb0 = tostring(it.label or "")
@@ -704,6 +729,7 @@ local function isIngot(e)
     if e.fluid then return false end
     local lb = tostring(e.label or "")
     if lb:find("[Ii]ngot$") then return true end
+    if lb:sub(-3) == "锭" then return true end
     if lb == "" then
         local od = tostring(e.oreDict or "")
         if od:sub(1, 5) == "ingot" then return true end
@@ -1007,10 +1033,16 @@ function M.run(ctx, args)
     end
     ctx.write("")
     if ctx.select then
-        ctx.select({ { label = "好了", value = 1 } }, {
+        local again = ctx.select({
+            { label = "继续", desc = "重新扫描接口再转一遍", value = 1 },
+            { label = "好了", desc = "回到主菜单", value = 2 },
+        }, {
             title = string.format("高炉转流体：成功 %d / 跳过 %d / 失败 %d", nOk, nSkip, nFail),
             footer = "失败的会写回原样，可以再跑一次",
         })
+        if again == 1 then
+            return M.run(ctx, args)
+        end
     else
         ctx.write("按任意键返回")
     end
@@ -1137,10 +1169,24 @@ function M.run(ctx, args)
     ctx.write(string.format("共 %d 个样板", #patterns))
     ctx.write("")
     local nAdd, nChange, nClear, nSkip, nFail = 0, 0, 0, 0, 0
+    local function patternMultiplier(p)
+        local firstIdx = nil
+        for idx in pairs(p.inputs or {}) do
+            if not firstIdx or idx < firstIdx then firstIdx = idx end
+        end
+        if not firstIdx then return 1 end
+        local e = p.inputs[firstIdx]
+        if not e then return 1 end
+        local n = tonumber(e.size or e.amount) or 1
+        if n < 1 then n = 1 end
+        return n
+    end
     for _, item in ipairs(patterns) do
         local slot = item.slot
         local p = item.pat
         local nIn = countInputs(p)
+        local mult = patternMultiplier(p)
+        local gasAmount = gas and math.floor(gas.amount * mult) or 0
         if nIn == 0 then
             nSkip = nSkip + 1
         else
@@ -1164,10 +1210,10 @@ function M.run(ctx, args)
             else
                 if gasIdx then
                     local ok = iface.setInterfacePatternInput(slot, gasIdx,
-                        { name = gas.id, size = gas.amount }, "fluid")
+                        { name = gas.id, size = gasAmount }, "fluid")
                     if ok then
                         nChange = nChange + 1
-                        ctx.write(string.format("槽 %d: %s → %s×%d", slot, gas.cn, gas.id, gas.amount))
+                        ctx.write(string.format("槽 %d: %s → %s×%d（×%d 倍）", slot, gas.cn, gas.id, gasAmount, mult))
                     else
                         nFail = nFail + 1
                         ctx.write(string.format("槽 %d: 改失败", slot))
@@ -1175,10 +1221,10 @@ function M.run(ctx, args)
                 else
                     local _, maxIdx = countInputs(p)
                     local ok = iface.setInterfacePatternInput(slot, maxIdx + 1,
-                        { name = gas.id, size = gas.amount }, "fluid")
+                        { name = gas.id, size = gasAmount }, "fluid")
                     if ok then
                         nAdd = nAdd + 1
-                        ctx.write(string.format("槽 %d: 加 %s×%d（第 %d 项）", slot, gas.id, gas.amount, maxIdx + 1))
+                        ctx.write(string.format("槽 %d: 加 %s×%d（第 %d 项，×%d 倍）", slot, gas.id, gasAmount, maxIdx + 1, mult))
                     else
                         nFail = nFail + 1
                         ctx.write(string.format("槽 %d: 加失败", slot))
@@ -1192,11 +1238,17 @@ function M.run(ctx, args)
     ctx.write(string.format("完成：加 %d，改 %d，清 %d，跳过 %d，失败 %d",
         nAdd, nChange, nClear, nSkip, nFail))
     if ctx.select then
-        ctx.select({ { label = "好了", value = 1 } }, {
+        local again = ctx.select({
+            { label = "继续", desc = "重新扫描再跑一遍", value = 1 },
+            { label = "好了", desc = "回到主菜单", value = 2 },
+        }, {
             title = string.format("保护气：加 %d / 改 %d / 清 %d / 跳过 %d / 失败 %d",
                 nAdd, nChange, nClear, nSkip, nFail),
             footer = "可以再去游戏里看看样板",
         })
+        if again == 1 then
+            return M.run(ctx, args)
+        end
     end
     return nFail == 0
 end
@@ -1206,7 +1258,7 @@ return M
 local component = require("component")
 local M = {
     id = "compression-fix",
-    name = "压模改固化",
+    name = "样板改固化",
     group = "AE2 样板",
     order = 50,
     desc = "按模具形状把输入换成对应熔融流体",
@@ -1216,6 +1268,30 @@ local SHAPE_WORDS = {
     "Plate", "Ring", "Screw", "Bolt", "Round", "Ingot", "Nugget",
     "Block", "Casing", "Stick",
 }
+local CN_MATERIAL = {
+    ["玄钢"] = "darksteel",
+    ["觉醒龙"] = "draconiumawakened",
+    ["通流琥珀金"] = "electrumflux",
+    ["镀铑钯"] = "rhodium-plated palladium",
+    ["高耐久性复合钢"] = "high durability compound steel",
+    ["精金合金"] = "adamantium alloy",
+    ["富集硅岩合金"] = "enriched naquadah alloy",
+    ["MAR-M200特种钢"] = "mar-m200 steel",
+    ["MAR-Ce-M200特种钢"] = "mar-ce-m200 steel",
+    ["阿瑟锡"] = "artherium-sn",
+    ["MV超导粗胚"] = "pentacadmiummagnesiumhexaoxid",
+    ["高速钢-S"] = "hsss",
+    ["稀有金属合金"] = "precious metals alloy",
+    ["原子分离催化剂"] = "atomic separation catalyst",
+}
+local CN_FLUID_RAW = [[BArTiMaEuSNeK=bartimaeusnek,EV超导粗胚=uraniumtriplatinid,HS188-A=hs188a,HV超导粗胚=titaniumonabariumdecacoppereikosaoxid,HeLiCoPtEr=helicopter,Hg-1223=hg1223,IV超导粗胚=vanadiumtriindinid,LuV超导粗胚=tetraindiumditindibariumtitaniumheptacoppertetrakaidekaoxid,MV超导粗胚=pentacadmiummagnesiumhexaoxid,UEV超导粗胚=superconductoruevbase,UHV超导粗胚=longasssuperconductornameforuhvwire,UIV超导粗胚=superconductoruivbase,UMV超导粗胚=superconductorumvbase,UV超导粗胚=longasssuperconductornameforuvwire,ZPM超导粗胚=tetranaquadahdiindiumhexaplatiumosminid,丁苯橡胶=styrenebutadienerubber,三元硅岩合金=triniumnaquadahalloy,三元金属=trinium,三元钛合金=triniumtitaniumalloy,三钛=tritanium,不锈钢=stainlesssteel,中子=neutronium,二氧化铬=chromiumdioxide,信素=signalium,充能合金=energeticalloy,充能银=energeticsilver,光素=hikarium,八角铁=octiron,六氟化钍=thoriumhexafluoride,六氟化铀=uraniumhexafluoride,六相铜=sixphasedcopper,凯芙拉=kevlar,创律合金=creon,力量=force,劳伦姆合金=laurenium,博特姆合金=botmium,古花岗岩=ancientgranite,合成玉=orundum,哈斯特洛依合金-C276=hastelloyc276,哈斯特洛依合金-N=hastelloyn,哈斯特洛依合金-W=hastelloyw,哈斯特洛依合金-X=hastelloyx,哈氏合金=ultimet,四氟化钍=thoriumtetrafluoride,四氟化铀=uraniumtetrafluoride,地狱金属=hellishmetal,坎塔尔合金=kanthal,埃格林钢=eglinsteel,基岩=bedrockium,塞龙-100=zeron100,复合黏土=crudesteel,大力合金=dalisenite,大马士革钢=damascussteel,天体钨=celestialtungsten,太阳能级硅(多晶硅)=siliconsolargrade,奥利哈钢=oriharukon,奥金=arcanite,奶酪=cheese,宇宙中子态素=cosmicneutronium,宇宙素=universium,富集硅岩=naquadahenriched,富集钬=enrichedholmium,对立合金=tairitsu,导电铁=conductiveiron,山铜=orichalcum,巴氏合金=babbitalloy,幽冥剧毒结晶=vyroxeres,强化混合晶锭=enhancedgalgadorian,强化金属=reinforced,彩色玻璃=chromaticglass,恒星合金=stellaralloy,戴斯=desh,拉多X聚合物=radoxpoly,掺碳三元硅岩合金=triniumnaquadahcarbonite,旋律合金=melodicalloy,无尽=infinity,无尽催化剂=infinitycatalyst,时空=spacetime,星体钛=astraltitanium,星辰银=astralsilver,晶化合金=crystallinealloy,晶化粉红史莱姆=crystallinepinkslime,暗影秘银=ceruclase,暗影金属=shadow,暗影钢=shadowsteel,暗影铁=shadowiron,木卫四冰=callistoice,末影粗胚=enderiumbase,末影钢=endsteel,末影锭=enderium,标准纯银=sterlingsilver,橡胶=rubber,殷钢=invar,氟化氢铵=ammoniumbifluoride,氟化铍=berylliumfluoride,氟化锂=lithiumfluoride,氢氧化铍=berylliumhydroxide,氧化镁=magnesia,氮化铌=niobiumnitride,永恒=eternity,注血铁=bloodinfusediron,注魔金=infusedgold,泰坦精钢=titansteel,泰拉钢=terrasteel,流明=lumiium,海晶硅岩=prismaticnaquadah,海珀珍=hypogen,液态氟钍反应堆燃料1=lftrfuel1,液态氟钍反应堆燃料2=lftrfuel2,液态氟钍反应堆燃料3=lftrfuel3,深渊合金=abyssalalloy,深渊铁=deepiron,深空秘银=mytryl,深铅=ledox,混合晶锭=galgadorian,温特姆=vinteum,源质钢=elvenelementium,灰钛合金=grisium,灵宝=ichorium,灿茶合金=mellion,炽热的钢=fierysteel,烈焰=blaze,焊锡=solderingalloy,熔火之石=tartarite,玄钢=darksteel,玄铁=darkiron,玛玉灵=manyullyn,玫瑰金=rosegold,环氧树脂=epoxid,玻璃=glass,琥珀金=electrum,生动合金=vividalloy,生硅=silicon,生铁=pigiron,电池合金=batteryalloy,白矮星物质=whitedwarfmatter,白铜=cupronickel,皮卡优合金64B=pikyonium64b,盖亚之魂=gaiaspirit,石棉=chrysotile,砷=arsenic,砷化镓=galliumarsenide,硅岩=naquadah,硅岩合金=naquadahalloy,硅橡胶=silicone,硒=selenium,硬铝=duralumin,硼=boron,硼玻璃=borosilicateglass,碘=iodine,碲=tellurium,碳化硅=siliconcarbide,碳化钨=tungstencarbide,碳化钨钛合金=tungstentitaniumcarbide,碳化钽=tantalumcarbide,碳化铌=niobiumcarbide,碳化锆=zirconiumcarbide,磁物质=magmatter,磁钢=electricalsteel,磷化铟镓=indiumgalliumphosphide,神秘水晶=mysteriouscrystal,神秘蓝金=alduorite,神秘锭=thaumium,秘银=mithril,粗青铜合金=potin,精金=adamantium,红石=redstone,红石合金=redstonealloy,红色合金=redalloy,红花岗岩=granitered,红钢=redsteel,纤维强化的环氧树脂=epoxidfiberreinforced,纯镃=tengampurified,终末=heeendium,耐热铬铁合金-020=incoloy020,耐热铬铁合金-903=incoloy-903,耐热铬铁合金-DS=incoloyds,耐热铬铁合金-MA956=incoloyma956,聚乙烯=plastic,聚四氟乙烯=polytetrafluoroethylene,聚己内酰胺=polycaprolactam,聚氯乙烯=polyvinylchloride,聚苯乙烯=polystyrene,聚苯并咪唑=polybenzimidazole,聚苯硫醚=polyphenylenesulfide,胶木=vulcanite,能量水晶=energycrystal,脉冲合金=vibrantalloy,脉冲铁=pulsatingiron,荧石=glowstone,蓝石=electrotine,蓝色合金=bluealloy,蓝钢=bluesteel,虚恩=runite,虚空=void,血钢=bloodsteel,褐铜=rubracium,西诺柏A243=cinobitea243,觉醒龙锭=draconiumawakened,调律源金=shirabon,谐镃=tengamattuned,贫铀合金=staballoy,超时空金属=transcendentmetal,超能硅岩=naquadria,路菲恩化合物=lafiumcompound,退火铜=annealedcopper,通流琥珀金=electrumflux,量子=quantium,量子合金=quantum,金=gold,钆=gadolinium,钇=yttrium,钇钡铜氧合金=yttriumbariumcuprate,钋=polonium,钌=ruthenium,钌铱合金=ruridit,钍=thorium,钐=samarium,钒=vanadium,钒钢=vanadiumsteel,钒镓合金=vanadiumgallium,钕=neodymium,钙=calcium,钚-238=plutonium238,钚-239=plutonium,钚-241=plutonium241,钛=titanium,钛铂钒合金=tpvalloy,钡=barium,钢=steel,钨=tungsten,钨钢=tungstensteel,钪=scandium,钬=holmium,钯=palladium,钴=cobalt,钴黄铜=cobaltbrass,钷=promethium,钼=molybdenum,钽=tantalum,钽钨合金-60=tantalloy60,钽钨合金-61=tantalloy61,钾=potassium,铀-232=uranium232,铀-233=uranium233,铀-235=uranium235,铀-238=uranium,铁=iron,铁木=ironwood,铂=platinum,铅=lead,铈=cerium,铊=thallium,铋=bismuth,铋铅合金140=indalloy140,铋青铜=bismuthbronze,铌=niobium,铌钛合金=niobiumtitanium,铍=beryllium,铑=rhodium,铒=erbium,铕=europium,铜=copper,铜金合金=tumbaga,铝=aluminium,铝化镍=nickelaluminide,铝黄铜=aluminiumbrass,铟=indium,铥=thulium,铬=chrome,铬钴磷酸盐合金=talonite,铬钴锰钛合金=stellite,铯=caesium,铱=iridium,铱锇合金=osmiridium,银=silver,铷=rubidium,铼=rhenium,铽=terbium,铿铀=duranium,锂=lithium,锂-7=lithium7,锆锡合金-2=zircaloy-2,锆锡合金-4=zircaloy-4,锇=osmium,锌=zinc,锌曜钢=alumite,锎=californium,锑=antimony,锔=curium,锗=germanium,锝=technetium,锡=tin,锡铁合金=tinalloy,锰=manganese,锶=strontium,镁=magnesium,镁铝合金=magnalium,镄=fermium,镅=americium,镍=nickel,镍钛诺60=nitinol60,镍铬合金=nichrome,镍铬基合金-625=inconel625,镍铬基合金-690=inconel690,镍铬基合金-792=inconel792,镍锌铁氧体=nickelzincferrite,镎=neptunium,镓=gallium,镝=dysprosium,镤=protactinium,镥=lutetium,镧=lanthanum,镨=praseodymium,镭=radium,镱=ytterbium,防水钢=watertightsteel,防爆玻璃=reinforcedglass,阳光化合物=sunnarium,阿尔宙斯合金2B=arceusalloy2b,阿瑟锡=artherium-sn,阿迪特=ardite,陨钢=meteoricsteel,陨铁=meteoriciron,雄黄=realgar,青铜=bronze,马氏体时效钢250=maragingsteel250,马氏体时效钢300=maragingsteel300,马氏体时效钢350=maragingsteel350,骑士金属=knightmetal,高级镍钛诺=advancednitinol,高速钢-E=hsse,高速钢-G=hssg,高速钢-S=hsss,魂金=soularium,魔力钢=manasteel,鲁格诺=rhugnor,黄铜=brass,黑曜石=obsidian,黑物质=blackmetal,黑矮星物质=blackdwarfmatter,黑花岗岩=graniteblack,黑钚=blackplutonium,黑钛=blacktitanium,黑钢=blacksteel,黑青铜=blackbronze,龙血=dragonblood,龙锭=draconium,=flerovium_gt5u]]
+local CN_FLUID = {}
+for k, v in CN_FLUID_RAW:gmatch("([^=,]+)=([^,]+)") do CN_FLUID[k] = v end
+local CN_SHAPES = {
+    "微型管道", "小型管道", "大型管道", "巨型管道", "小型齿轮",
+    "涡轮扇叶", "方块", "长杆", "管道", "齿轮", "转子",
+    "螺丝", "螺栓", "滚珠", "锭", "粒", "块", "外壳", "杆", "板", "环",
+}
 local function matchShape(label)
     local lb = label
     local function has(w)
@@ -1224,6 +1300,28 @@ local function matchShape(label)
     if has("Turbine Blade") then return { key = "Turbine Blade", l = 864, cn = "涡轮扇叶" } end
     if has("Drill Tip") then return { key = "Drill Tip", l = 576, cn = "钻头" } end
     if has("Drill Head") then return { key = "Drill Head", l = 576, cn = "钻头" } end
+    if has("微型管道") then return { key = "Tiny Pipe", l = 72, cn = "微型管道" } end
+    if has("小型管道") then return { key = "Small Pipe", l = 144, cn = "小型管道" } end
+    if has("巨型管道") then return { key = "Huge Pipe", l = 1728, cn = "巨型管道" } end
+    if has("大型管道") then return { key = "Large Pipe", l = 864, cn = "大型管道" } end
+    if has("涡轮扇叶") then return { key = "Turbine Blade", l = 864, cn = "涡轮扇叶" } end
+    if has("钻头") then return { key = "Drill Tip", l = 576, cn = "钻头" } end
+    if has("小型齿轮") then return { key = "Small Gear", l = 144, cn = "小型齿轮" } end
+    if has("长杆") then return { key = "Long Rod", l = 144, cn = "长杆" } end
+    if has("管道") then return { key = "Pipe", l = 432, cn = "管道" } end
+    if has("齿轮") then return { key = "Gear", l = 576, cn = "齿轮" } end
+    if has("转子") then return { key = "Rotor", l = 612, cn = "转子" } end
+    if has("螺丝") then return { key = "Screw", l = 18, cn = "螺丝" } end
+    if has("螺栓") then return { key = "Bolt", l = 18, cn = "螺栓" } end
+    if has("滚珠") then return { key = "Round", l = 16, cn = "滚珠" } end
+    if has("方块") then return { key = "Block", l = 1296, cn = "方块" } end
+    if has("外壳") then return { key = "Casing", l = 72, cn = "外壳" } end
+    if has("锭") then return { key = "Ingot", l = 144, cn = "锭" } end
+    if has("粒") then return { key = "Nugget", l = 16, cn = "粒" } end
+    if has("块") then return { key = "Block", l = 1296, cn = "块" } end
+    if has("杆") then return { key = "Rod", l = 72, cn = "杆" } end
+    if has("板") then return { key = "Plate", l = 144, cn = "板" } end
+    if has("环") then return { key = "Ring", l = 36, cn = "环" } end
     if has("Pipe") then
         if has("Tiny") then return { key = "Tiny Pipe", l = 72, cn = "微型管道" } end
         if has("Small") then return { key = "Small Pipe", l = 144, cn = "小型管道" } end
@@ -1261,22 +1359,34 @@ local function materialOf(label)
     for _, w in ipairs(SHAPE_WORDS) do
         m = m:gsub("%s*" .. w .. "$", "")
     end
+    m = m:gsub("^热", "")
+    for _, w in ipairs(CN_SHAPES) do
+        if #m >= #w and m:sub(-#w) == w then
+            m = m:sub(1, #m - #w)
+            break
+        end
+    end
     m = m:gsub("^Block%s+of%s+", "")
     m = m:gsub("^Block%s+", "")
     m = m:gsub("^of%s+", "")
     m = m:gsub("%s*Fluid$", "")
     m = m:gsub("^%s+", ""):gsub("%s+$", "")
-    return m
+    if m == "" then return nil, nil end
+    return CN_MATERIAL[m] or m, m
 end
 local ALIASES = {
     ["plutonium239"] = "molten.plutonium",
     ["rawsilicon"] = "molten.silicon",
     ["uranium238"] = "molten.uranium",
     ["awakeneddraconium"] = "molten.draconiumawakened",
+    ["draconiumawakened"] = "molten.draconiumawakened",
     ["endium"] = "molten.heeendium",
     ["deepdarkiron"] = "molten.darkiron",
     ["fluxedelectrum"] = "molten.electrumflux",
+    ["electrumflux"] = "molten.electrumflux",
+    ["darksteel"] = "molten.darksteel",
     ["hslasteel"] = "molten.hsla",
+    ["hsss"] = "molten.hsss",
     ["enrichednaquadah"] = "molten.naquadahenriched",
     ["fluxedobsidian"] = "molten.obsidianflux",
     ["voidmetal"] = "molten.void",
@@ -1296,6 +1406,7 @@ local ALIASES = {
     ["shadowmetal"] = "molten.shadow",
     ["claycompound"] = "molten.crudesteel",
     ["superconductorbasemv"] = "molten.pentacadmiummagnesiumhexaoxid",
+    ["pentacadmiummagnesiumhexaoxid"] = "molten.pentacadmiummagnesiumhexaoxid",
     ["superconductorbasehv"] = "molten.titaniumonabariumdecacoppereikosaoxid",
     ["superconductorbaseev"] = "molten.uraniumtriplatinid",
     ["superconductorbaseiv"] = "molten.vanadiumtriindinid",
@@ -1307,9 +1418,23 @@ local ALIASES = {
     ["superconductorbaseuiv"] = "molten.superconductoruivbase",
     ["superconductorbaseumv"] = "molten.superconductorumvbase",
     ["radoxpolymer"] = "molten.radoxpoly",
+    ["marcem200steel"] = "molten.mar-ce-m200 steel",
+    ["marm200steel"] = "molten.mar-m200 steel",
+    ["adamantiumalloy"] = "molten.adamantium alloy",
+    ["enrichednaquadahalloy"] = "molten.enriched naquadah alloy",
+    ["preciousmetalsalloy"] = "molten.precious metals alloy",
+    ["artheriumsn"] = "molten.artherium-sn",
+    ["rhodiumplatedpalladium"] = "molten.rhodium-plated palladium",
+    ["highdurabilitycompoundsteel"] = "molten.high durability compound steel",
+    ["atomicseparationcatalyst"] = "molten.atomic separation catalyst",
 }
 local function fluidCandidates(mat)
     local out = {}
+    local direct = CN_FLUID[mat]
+    if direct then
+        out[#out + 1] = "molten." .. direct
+        return out
+    end
     local key = mat:lower():gsub("[^%w]", "")
     if ALIASES[key] then
         out[#out + 1] = ALIASES[key]
@@ -1342,9 +1467,10 @@ function M.run(ctx, args)
         return false
     end
     ctx.clear()
-    ctx.write("压模改固化：扫描全部样板")
+    ctx.write("样板改固化：扫描全部样板")
     ctx.write(string.rep("-", 56))
     local nDone, nSkip, nFail = 0, 0, 0
+    local problems = {}
     for slot = 1, 36 do
         local okP, p = pcall(iface.getInterfacePattern, slot)
         if okP and p and p.outputs then
@@ -1360,14 +1486,19 @@ function M.run(ctx, args)
                 end
             end
             if best then
-                local mat = materialOf(best.label)
+                local mat, matCn = materialOf(best.label)
                 local need = (tonumber(best.e.size) or 1) * best.shape.l
+                if not mat then
+                    nSkip = nSkip + 1
+                    problems[#problems + 1] = string.format("槽%d 认不出材料「%s」", slot, best.label)
+                else
                 local targetIdx, targetLabel, alreadyFluid = nil, nil, false
                 if p.inputs then
                     for idx, e in pairs(p.inputs) do
                         local inLabel = tostring(e.label or "")
                         local inName = tostring(e.name or ""):lower()
-                        if inLabel:lower():find(mat:lower(), 1, true) then
+                        if inLabel:lower():find(mat:lower(), 1, true)
+                            or (matCn and matCn ~= mat and inLabel:find(matCn, 1, true)) then
                             if inName:find("molten") or inName:find("fluid") then
                                 alreadyFluid = true
                                 targetLabel = inLabel
@@ -1380,8 +1511,11 @@ function M.run(ctx, args)
                 end
                 if alreadyFluid then
                     nSkip = nSkip + 1
+                    problems[#problems + 1] = string.format("槽%d %s：输入已经是流体", slot, best.shape.cn)
                 elseif not targetIdx then
                     nSkip = nSkip + 1
+                    problems[#problems + 1] = string.format("槽%d %s：输入里没有「%s」的项",
+                        slot, best.shape.cn, matCn or mat)
                     ctx.write(string.format("槽%d %s：输入里没有含「%s」的项",
                         slot, best.shape.cn, mat))
                 else
@@ -1403,9 +1537,12 @@ function M.run(ctx, args)
                             fluidCandidates(mat)[1], need))
                     else
                         nFail = nFail + 1
+                        problems[#problems + 1] = string.format("槽%d %s：流体名 %s 不存在",
+                            slot, best.shape.cn, fluidCandidates(mat)[1])
                         ctx.write(string.format("槽%d %s：流体名 %s 不存在",
                             slot, best.shape.cn, fluidCandidates(mat)[1]))
                     end
+                end
                 end
             end
         end
@@ -1414,10 +1551,19 @@ function M.run(ctx, args)
     ctx.write(string.rep("-", 56))
     ctx.write(string.format("完成：改了 %d 个，跳过 %d 个，失败 %d 个", nDone, nSkip, nFail))
     if ctx.select then
-        ctx.select({ { label = "好了", value = 1 } }, {
-            title = string.format("压模改固化：改 %d / 跳过 %d / 失败 %d", nDone, nSkip, nFail),
-            footer = "输入已经是流体的样班会自动跳过",
+        local items = {}
+        for _, msg in ipairs(problems) do
+            items[#items + 1] = { label = msg, desc = "没改的原因", value = 0 }
+        end
+        items[#items + 1] = { label = "继续", desc = "重新扫描再跑一遍", value = 1 }
+        items[#items + 1] = { label = "好了", desc = "返回", value = 2 }
+        local again = ctx.select(items, {
+            title = string.format("样板改固化：改 %d / 跳过 %d / 失败 %d", nDone, nSkip, nFail),
+            footer = "上面几行是没改的原因；输入已经是流体的会自动跳过",
         })
+        if again == 1 then
+            return M.run(ctx, args)
+        end
     end
     return nFail == 0
 end
@@ -1445,16 +1591,16 @@ local RECIPES = {
             { name = "gregtech:gt.metaitem.02", damage = 18974, size = 1, label = "Superconductor Base UEV Casing" },
             { name = "miscutils:itemPlateRhugnor", damage = 0, size = 2, label = "Rhugnor Plate" },
             { name = "gregtech:gt.metaitem.03", damage = 32157, size = 2, label = "Optical Mainframe" },
-            { name = "gregtech:gt.metaitem.03", damage = 32269, size = 8, label = "Opto Power IC" },
+            { name = "gregtech:gt.metaitem.03", damage = 32269, size = 8, label = "Atto Power IC" },
             { name = "molten.kevlar", size = 288, fluid = true, label = "Molten Kevlar" },
             { name = "bartworks:gt.bwMetaGeneratedscrew", damage = 10110, size = 2, label = "Enriched Naquadah Alloy Screw" },
             { name = "miscutils:itemBoltRhugnor", damage = 0, size = 8, label = "Rhugnor Bolt" },
             { name = "spatialfluid", size = 250, fluid = true, label = "Spatially Enlarged Fluid" },
-            { name = "gregtech:gt.metaitem.01", damage = 32728, size = 4, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32728, size = 4, rename = true, label = "qq3" },
             { name = "gregtech:gt.metaitem.02", damage = 19154, size = 64, label = "Fine Proto-Halkonite Steel Wire" },
             { name = "gregtech:gt.metaitem.01", damage = 26581, size = 32, label = "Transcendent Metal Bolt" },
             { name = "dimensionallyshiftedsuperfluid", size = 80, fluid = true, label = "Dimensionally Shifted Superfluid" },
-            { name = "grade6purifiedwater", size = 500, fluid = true, label = "Grade 6 Water" },
+            { name = "grade6purifiedwater", size = 500, fluid = true, label = "Ultraviolet Treated Electrically Neutral Water (Grade 6)" },
             { name = "lubricant", size = 640, fluid = true, label = "Lubricant" },
             { name = "gregtech:gt.blockmachines", damage = 11430, size = 8, label = "1x Infinity Wire" },
             { name = "molten.mutatedlivingsolder", size = 2304, fluid = true, label = "Mutated Living Solder" },
@@ -1481,7 +1627,7 @@ local RECIPES = {
             { name = "bartworks:gt.bwMetaGeneratedfoil", damage = 10112, size = 32, label = "Shirabon Foil" },
             { name = "miscutils:blockFrameGtHypogen", damage = 0, size = 2, label = "Hypogen Frame Box" },
             { name = "gregtech:gt.metaitem.01", damage = 27147, size = 4, label = "Six-Phased Copper Screw" },
-            { name = "gregtech:gt.metaitem.02", damage = 18149, size = 1, label = "Cream Casing" },
+            { name = "gregtech:gt.metaitem.02", damage = 18149, size = 1, label = "Creon Casing" },
             { name = "dreamcraft:PikoCircuit", damage = 0, size = 2, label = "Pico Circuit" },
             { name = "miscutils:itemScrewQuantum", damage = 0, size = 2, label = "Quantum Screw" },
             { name = "bartworks:gt.bwMetaGeneratedplate", damage = 10111, size = 2, label = "Metastable Oganesson Plate" },
@@ -1502,10 +1648,11 @@ local RECIPES = {
             { name = "lubricant", size = 1280, fluid = true, label = "Lubricant" },
             { name = "ic2uumatter", size = 16000, fluid = true, label = "UU-Matter" },
             { name = "molten.sixphasedcopper", size = 144, fluid = true, label = "Molten Six-Phased Copper" },
-            { name = "exciteddtec", size = 1000, fluid = true, label = "Excited D.T. Exotic Catalyst" },
+            { name = "exciteddtec", size = 1000, fluid = true, label = "Excited Dimensionally Transcendent Exotic Catalyst" },
+            { name = "molten.radoxpoly", size = 288, fluid = true, label = "Molten Radox Polymer" },
             { name = "spatialfluid", size = 500, fluid = true, label = "Spatially Enlarged Fluid" },
             { name = "dimensionallyshiftedsuperfluid", size = 80, fluid = true, label = "Dimensionally Shifted Superfluid" },
-            { name = "grade7purifiedwater", size = 1000, fluid = true, label = "Grade 7 Water" },
+            { name = "grade7purifiedwater", size = 1000, fluid = true, label = "Degassed Decontaminant-Free Water (Grade 7)" },
             { name = "dimensionallytranscendentresidue", size = 2000, fluid = true, label = "Dimensionally Transcendent Residue" },
             { name = "gregtech:gt.metaitem.03", damage = 32728, size = 8, rename = true, label = "qq3" },
             { name = "gregtech:gt.metaitem.03", damage = 32181, size = 64, label = "Optical SMD Capacitor" },
@@ -1513,6 +1660,89 @@ local RECIPES = {
             { name = "gregtech:gt.metaitem.03", damage = 32179, size = 64, label = "Optical SMD Diode" },
             { name = "gregtech:gt.metaitem.03", damage = 32184, size = 64, label = "Optical SMD Inductor" },
             { name = "gregtech:gt.metaitem.03", damage = 32180, size = 64, label = "Optical SMD Transistor" },
+        },
+    },
+    {
+        name = "普朗克电路",
+        out = {
+            { name = "dreamcraft:PlanckCircuit", damage = 0, size = 1, label = "Planck-Scale Circuit" },
+        },
+        ins = {
+            { name = "gregtech:gt.metaitem.03", damage = 32278, size = 1, label = "Calabi-Yau Manifold" },
+            { name = "gregtech:gt.metaitem.01", damage = 27139, size = 2, label = "Universium Screw" },
+            { name = "gregtech:gt.metaitem.02", damage = 18586, size = 2, label = "Black Dwarf Matter Casing" },
+            { name = "gregtech:gt.metaitem.03", damage = 32286, size = 1, label = "Realized Quantum Mainframe Rack" },
+            { name = "gregtech:gt.metaitem.03", damage = 32282, size = 4, label = "Unbound Microcosmic Wire Strands" },
+            { name = "gregtech:gt.metaitem.03", damage = 32184, size = 64, label = "Optical SMD Inductor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32179, size = 64, label = "Optical SMD Diode" },
+            { name = "gregtech:gt.metaitem.03", damage = 32180, size = 64, label = "Optical SMD Transistor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32181, size = 64, label = "Optical SMD Capacitor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32178, size = 64, label = "Optical SMD Resistor" },
+            { name = "miscutils:itemFineWireHypogen", damage = 0, size = 64, label = "Fine Hypogen Wire" },
+            { name = "gregtech:gt.metaitem.01", damage = 26585, size = 32, label = "White Dwarf Matter Bolt" },
+            { name = "gregtech:gt.metaitem.03", damage = 32759, size = 8, label = "Thermal Superconductor" },
+            { name = "gregtech:gt.metaitem.01", damage = 29141, size = 64, label = "Eternity Foil" },
+            { name = "gregtech:gt.blockframes", damage = 143, size = 2, label = "Magmatter Frame Box" },
+            { name = "gregtech:gt.metaitem.01", damage = 17174, size = 2, label = "Hexanite Plate" },
+            { name = "gregtech:gt.metaitem.01", damage = 26174, size = 8, label = "Hexanite Bolt" },
+            { name = "gregtech:gt.metaitem.03", damage = 32273, size = 8, label = "Yocto Power IC" },
+            { name = "gregtech:gt.metaitem.03", damage = 32284, size = 4, label = "Isolated Macrocosmic Wire Strands" },
+            { name = "gregtech:gt.blockmachines", damage = 2089, size = 64, label = "1x Superconductor UMV Wire" },
+            { name = "gregtech:gt.metaitem.03", damage = 32178, size = 128, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32179, size = 128, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32181, size = 128, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32184, size = 128, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32180, size = 128, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32728, size = 32, rename = true, label = "qq3" },
+            { name = "dimensionallyshiftedsuperfluid", size = 280, fluid = true, label = "Dimensionally Shifted Superfluid" },
+            { name = "molten.shirabon", size = 288, fluid = true, label = "Molten Shirabon" },
+            { name = "rawstarmatter", size = 2000, fluid = true, label = "Condensed Raw Stellar Plasma Mixture" },
+            { name = "quarkgluonplasma", size = 2000, fluid = true, label = "Degenerate Quark Gluon Plasma" },
+            { name = "lubricant", size = 640, fluid = true, label = "Lubricant" },
+            { name = "boundlesscosmicsolder", size = 4000, fluid = true, label = "Boundless Cosmic Solder" },
+            { name = "primordialmatter", size = 4000, fluid = true, label = "Liquid Primordial Matter" },
+            { name = "phononmedium", size = 1000, fluid = true, label = "Lossless Phonon Transfer Medium" },
+            { name = "spatialfluid", size = 5000, fluid = true, label = "Spatially Enlarged Fluid" },
+        },
+    },
+    {
+        name = "量子框架",
+        out = {
+            { name = "gregtech:gt.metaitem.03", damage = 32285, size = 1, label = "Lost Quantum Mainframe Rack" },
+            { name = "gregtech:gt.metaitem.03", damage = 32283, size = 4, label = "Macrocosmic Wire Strands" },
+            { name = "gregtech:gt.metaitem.03", damage = 32281, size = 4, label = "Pulsating Microcosmic Wire Strands" },
+        },
+        ins = {
+            { name = "gregtech:gt.metaitem.01", damage = 27141, size = 2, label = "Eternity Screw" },
+            { name = "gregtech:gt.metaitem.02", damage = 19585, size = 4, label = "Fine White Dwarf Matter Wire" },
+            { name = "gregtech:gt.metaitem.02", damage = 19586, size = 4, label = "Fine Black Dwarf Matter Wire" },
+            { name = "gregtech:gt.metaitem.02", damage = 19139, size = 4, label = "Fine Universium Wire" },
+            { name = "dreamcraft:QuantumCircuit", damage = 0, size = 2, label = "Quantum Circuit" },
+        },
+    },
+    {
+        name = "原始歧管芽",
+        out = {
+            { name = "gregtech:gt.metaitem.03", damage = 32279, size = 1, label = "Raw Manifold Bud" },
+        },
+        ins = {
+            { name = "gregtech:gt.metaitem.02", damage = 18141, size = 4, label = "Eternity Casing" },
+            { name = "miscutils:blockFrameGtHypogen", damage = 0, size = 2, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32728, size = 16, label = "Optical Circuit Board" },
+            { name = "gregtech:gt.metaitem.01", damage = 17174, size = 6, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.01", damage = 26174, size = 24, rename = true, label = "qq3" },
+            { name = "gregtech:gt.metaitem.03", damage = 32184, size = 64, label = "Optical SMD Inductor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32181, size = 64, label = "Optical SMD Capacitor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32178, size = 64, label = "Optical SMD Resistor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32180, size = 64, label = "Optical SMD Transistor" },
+            { name = "gregtech:gt.metaitem.03", damage = 32179, size = 64, label = "Optical SMD Diode" },
+            { name = "gregtech:gt.metaitem.02", damage = 19143, size = 8, label = "Fine Magmatter Wire" },
+            { name = "bartworks:gt.bwMetaGeneratedfoil", damage = 10112, size = 64, rename = true, label = "qq3" },
+            { name = "boundlesscosmicsolder", size = 1000, fluid = true, label = "Boundless Cosmic Solder" },
+            { name = "primordialmatter", size = 1000, fluid = true, label = "Liquid Primordial Matter" },
+            { name = "molten.radoxpoly", size = 2304, fluid = true, label = "Molten Radox Polymer" },
+            { name = "exciteddtsc", size = 4000, fluid = true, label = "Excited Dimensionally Transcendent Stellar Catalyst" },
+            { name = "grade7purifiedwater", size = 1000, fluid = true, label = "Degassed Decontaminant-Free Water (Grade 7)" },
         },
     },
 }
@@ -1544,7 +1774,7 @@ local ELEMENTS = {
     { kind = "dust", cn = "硅", en = "silicon", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2020, cell = "gregtech:gt.metaitem.01", cellMeta = 31020 },
     { kind = "dust", cn = "钍-232", en = "thorium232", weight = 6, reg = "bartworks:gt.bwMetaGenerateddust", meta = 30, cell = "miscutils:itemCellPlasmaThorium232", cellMeta = 0 },
     { kind = "dust", cn = "钌", en = "ruthenium", weight = 6, reg = "bartworks:gt.bwMetaGenerateddust", meta = 64, cell = "miscutils:itemCellPlasmaRuthenium", cellMeta = 0 },
-    { kind = "dust", cn = "锗", en = "germanium", weight = 2, reg = "miscutils:itemDustGermanium", meta = 28, cell = "miscutils:itemCellPlasmaGermanium", cellMeta = 0 },
+    { kind = "dust", cn = "锗", en = "germanium", weight = 2, reg = "miscutils:itemDustGermanium", meta = 0, cell = "miscutils:itemCellPlasmaGermanium", cellMeta = 0 },
     { kind = "dust", cn = "钴", en = "cobalt", weight = 6, reg = "gregtech:gt.metaitem.01", meta = 2033, cell = "gregtech:gt.metaitem.01", cellMeta = 31033 },
     { kind = "dust", cn = "锡", en = "tin", weight = 10, reg = "gregtech:gt.metaitem.01", meta = 2057, cell = "gregtech:gt.metaitem.01", cellMeta = 31057 },
     { kind = "dust", cn = "铼", en = "rhenium", weight = 2, reg = "miscutils:itemDustRhenium", meta = 31, cell = "miscutils:itemCellPlasmaRhenium", cellMeta = 0 },
@@ -1600,7 +1830,7 @@ local ELEMENTS = {
 }
 local CI_ITEMS = {
     { cn = "基岩", en = "bedrockium", reg = "gregtech:gt.metaitem.01", meta = 2395, cell = "gregtech:gt.metaitem.01", cellMeta = 31395, plasma = "plasma.bedrockium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11395 },
-    { cn = "龙", en = "draconium", reg = "gregtech:gt.metaitem.01", meta = 2975, cell = "gregtech:gt.metaitem.01", cellMeta = 31975, plasma = "plasma.draconium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11975 },
+    { cn = "龙", en = "draconium", reg = "draconicevolution:draconiumDust", meta = 0, cell = "gregtech:gt.metaitem.01", cellMeta = 31975, plasma = "plasma.draconium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11975 },
     { cn = "三钛", en = "tritanium", reg = "gregtech:gt.metaitem.01", meta = 2329, cell = "gregtech:gt.metaitem.01", cellMeta = 31329, plasma = "plasma.tritanium" , ingot = "gregtech:gt.metaitem.01", ingotMeta = 11329 },
     { cn = "海珀珍", en = "hypogen", reg = "miscutils:itemDustHypogen", meta = 0, cell = "miscutils:itemCellPlasmaHypogen", cellMeta = 0, plasma = "plasma.hypogen" , ingot = "miscutils:itemIngotHypogen", ingotMeta = 0 },
     { cn = "龙血", en = "dragonblood", reg = "miscutils:itemDustDragonblood", meta = 0, cell = "miscutils:itemCellPlasmaDragonblood", cellMeta = 0, plasma = "plasma.dragonblood" , ingot = "miscutils:itemIngotDragonblood", ingotMeta = 0 },
@@ -1626,11 +1856,12 @@ local function findIfaces()
     end
     return list
 end
-local function findDb()
+local function findDbs()
+    local list = {}
     for addr in component.list("database") do
-        return component.proxy(addr)
+        list[#list + 1] = component.proxy(addr)
     end
-    return nil
+    return list
 end
 local function usedSlots(ifaces)
     local out = {}
@@ -1651,15 +1882,79 @@ local function say(ctx, title, footer)
         ctx.write(title)
     end
 end
-local function writeOne(s, w, db)
+local function clearDbs(dbs)
+    for _, db in ipairs(dbs) do
+        local size = 64
+        local ok, n = pcall(db.size)
+        if ok and type(n) == "number" and n > 0 then
+            size = n
+        end
+        for s = 1, size do
+            pcall(db.clear, s)
+        end
+        os.sleep(0)
+    end
+end
+local function buildDbCache(dbs)
+    local cache, empties = {}, {}
+    for _, db in ipairs(dbs) do
+        local size = 64
+        local ok, n = pcall(db.size)
+        if ok and type(n) == "number" and n > 0 then
+            size = n
+        end
+        for s = 1, size do
+            local okG, v = pcall(db.get, s)
+            if okG then
+                local vname = nil
+                local vdmg = 0
+                if type(v) == "table" then
+                    vname = v.name
+                    vdmg = tonumber(v.damage) or 0
+                end
+                if vname and vname ~= "" then
+                    local key = tostring(vname) .. "|" .. tostring(vdmg)
+                    if not cache[key] then
+                        cache[key] = { db = db, slot = s }
+                    end
+                else
+                    empties[#empties + 1] = { db = db, slot = s }
+                end
+            end
+        end
+        os.sleep(0)
+    end
+    return cache, empties
+end
+local function dbSlotFor(cache, empties, name, damage, snbt)
+    local key = name .. "|" .. tostring(damage)
+    local hit = cache[key]
+    if hit then
+        return hit.db, hit.slot
+    end
+    local e = table.remove(empties, 1)
+    if e then
+        local okS = pcall(e.db.set, e.slot, name, damage, snbt)
+        if okS then
+            cache[key] = { db = e.db, slot = e.slot }
+            return e.db, e.slot
+        end
+        table.insert(empties, 1, e)
+    end
+    return nil, nil
+end
+local function writeOne(s, w, dbs, cache, empties)
     local nErr = nil
     local iface, slot = s.iface, s.slot
     for i, o in ipairs(w.outs) do
         local ok, err
-        if o.rename and db then
-            ok, err = pcall(db.set, 1, o.name, o.damage or 0, '{display:{Name:"' .. o.rename .. '"}}')
-            if ok then
-                ok, err = pcall(iface.setInterfacePatternOutput, slot, i, db.address, 1, o.size or 1)
+        if o.rename and #dbs > 0 then
+            local snbt = '{display:{Name:"' .. o.rename .. '"}}'
+            local rdb, ds = dbSlotFor(cache, empties, o.name, o.damage or 0, snbt)
+            if rdb then
+                ok, err = pcall(iface.setInterfacePatternOutput, slot, i, rdb.address, ds, o.size or 1)
+            else
+                ok, err = false, "数据库槽不够"
             end
         elseif o.fluid then
             ok, err = pcall(iface.setInterfacePatternOutput, slot, i, { name = o.name, size = o.size }, "fluid")
@@ -1671,10 +1966,13 @@ local function writeOne(s, w, db)
     end
     for i, e in ipairs(w.ins) do
         local ok, err
-        if e.rename and e.renameTo and db then
-            ok, err = pcall(db.set, 1, e.name, e.damage or 0, '{display:{Name:"' .. e.renameTo .. '"}}')
-            if ok then
-                ok, err = pcall(iface.setInterfacePatternInput, slot, i, db.address, 1, e.size)
+        if e.rename and e.renameTo and #dbs > 0 then
+            local snbt = '{display:{Name:"' .. e.renameTo .. '"}}'
+            local rdb, ds = dbSlotFor(cache, empties, e.name, e.damage or 0, snbt)
+            if rdb then
+                ok, err = pcall(iface.setInterfacePatternInput, slot, i, rdb.address, ds, e.size)
+            else
+                ok, err = false, "数据库槽不够"
             end
         elseif e.fluid then
             ok, err = pcall(iface.setInterfacePatternInput, slot, i, { name = e.name, size = e.size }, "fluid")
@@ -1717,13 +2015,26 @@ local function genNAC(idx, renameTo)
     local r = RECIPES[idx]
     local ins = {}
     for _, e in ipairs(r.ins) do
-        local t = item(e.name, e.size, e.damage)
-        t.fluid = e.fluid
-        if e.rename then
-            t.rename = true
-            t.renameTo = renameTo or e.label
+        if e.rename and (e.size or 0) > 64 then
+            local left = e.size
+            while left > 0 do
+                local n = math.min(left, 64)
+                local t = item(e.name, n, e.damage)
+                t.fluid = e.fluid
+                t.rename = true
+                t.renameTo = renameTo or e.label
+                ins[#ins + 1] = t
+                left = left - n
+            end
+        else
+            local t = item(e.name, e.size, e.damage)
+            t.fluid = e.fluid
+            if e.rename then
+                t.rename = true
+                t.renameTo = renameTo or e.label
+            end
+            ins[#ins + 1] = t
         end
-        ins[#ins + 1] = t
     end
     local outs = {}
     for _, o in ipairs(r.out) do
@@ -1870,10 +2181,25 @@ local function genCI(which)
     end
     return list
 end
-local function runList(ctx, ifaces, list, db)
+local function runList(ctx, ifaces, list, dbs)
     local total = #list
     local idx = 1
     local nOk, nErr = 0, 0
+    local needDb = false
+    for _, w in ipairs(list) do
+        for _, o in ipairs(w.outs) do
+            if o.rename then needDb = true end
+        end
+        for _, e in ipairs(w.ins) do
+            if e.rename then needDb = true end
+        end
+        if needDb then break end
+    end
+    local dbCache, dbEmpties = {}, {}
+    if needDb and #dbs > 0 then
+        clearDbs(dbs)
+        dbCache, dbEmpties = buildDbCache(dbs)
+    end
     ctx.clear()
     ctx.write(string.format("共 %d 个样板，分批写入", total))
     ctx.write("每批写满当前所有占位样板后暂停，换好再继续")
@@ -1897,7 +2223,7 @@ local function runList(ctx, ifaces, list, db)
             local batch = math.min(#slots, total - idx + 1)
             for j = 1, batch do
                 local w = list[idx + j - 1]
-                local err = writeOne(slots[j], w, db)
+                local err = writeOne(slots[j], w, dbs, dbCache, dbEmpties)
                 if err then
                     nErr = nErr + 1
                     ctx.write(string.format("  [%d] %s 失败: %s", idx + j - 1, w.tag, err))
@@ -1946,6 +2272,7 @@ function M.run(ctx, args)
     local pick = menu(ctx, {
         { label = "皮米电路", desc = "NAC · 31 项输入", value = "nac:1" },
         { label = "量子电路", desc = "NAC · 36 项输入", value = "nac:2" },
+        { label = "普朗克电路", desc = "NAC · 3 个样板一次生成", value = "nac:planck" },
         { label = "神锻等离子样板", desc = "94 种 → 等离子", value = "plasma" },
         { label = "夸克 · 发配样板", desc = "粉+1296 / 气体+1000 → 单元", value = "quark:fapei" },
         { label = "夸克 · 汇总下单", desc = "80 单元 ×2e9 → 铁剑", value = "quark:sum" },
@@ -1959,11 +2286,18 @@ function M.run(ctx, args)
     local group, key = pick:match("^([^:]+):(.+)$")
     local list
     if group == "nac" then
-        local idx = tonumber(key)
+        local targets
+        if key == "planck" then
+            targets = { 3, 4, 5 }
+        else
+            targets = { tonumber(key) }
+        end
         local renameTo = nil
         local hasRename = false
-        for _, e in ipairs(RECIPES[idx].ins) do
-            if e.rename then hasRename = true end
+        for _, ti in ipairs(targets) do
+            for _, e in ipairs(RECIPES[ti].ins) do
+                if e.rename then hasRename = true end
+            end
         end
         if hasRename then
             ctx.clear()
@@ -1976,7 +2310,12 @@ function M.run(ctx, args)
             if renameTo == "" then renameTo = nil end
             ctx.clear()
         end
-        list = genNAC(idx, renameTo)
+        list = {}
+        for _, ti in ipairs(targets) do
+            for _, w in ipairs(genNAC(ti, renameTo)) do
+                list[#list + 1] = w
+            end
+        end
     elseif pick == "plasma" then
         list = genPlasma()
     elseif group == "quark" then
@@ -1985,23 +2324,630 @@ function M.run(ctx, args)
         list = genCI(key)
     end
     if not list or #list == 0 then return true end
-    local db = findDb()
-    if (group == "quark" or group == "ci") and not db then
-        local needRename = false
-        for _, w in ipairs(list) do
-            for _, o in ipairs(w.outs) do
-                if o.rename then needRename = true end
-            end
-            for _, e in ipairs(w.ins) do
-                if e.rename then needRename = true end
-            end
+    local dbs = findDbs()
+    local needRename = false
+    for _, w in ipairs(list) do
+        for _, o in ipairs(w.outs) do
+            if o.rename then needRename = true end
         end
-        if needRename then
-            say(ctx, "需在适配器中放入数据库升级", "要写重命名物品，需在适配器中放入数据库升级")
-            return false
+        for _, e in ipairs(w.ins) do
+            if e.rename then needRename = true end
         end
     end
-    return runList(ctx, ifaces, list, db)
+    if needRename and #dbs == 0 then
+        say(ctx, "需在适配器中放入数据库升级", "要写重命名物品，需在适配器中放入数据库升级")
+        return false
+    end
+    return runList(ctx, ifaces, list, dbs)
+end
+return M
+]====],
+    ["/home/tools/pattern-dump.lua"] = [====[
+local component = require("component")
+local M = {
+    id = "pattern-dump",
+    name = "样板导出",
+    group = "AE2 样板",
+    order = 70,
+    desc = "扫描所有样板，输入输出写到 /home/pattern-dump.txt",
+}
+local function findIfaces()
+    local list = {}
+    for addr in component.list("fluid_interface") do
+        list[#list + 1] = component.proxy(addr)
+    end
+    if #list == 0 then
+        for addr in component.list("me_interface") do
+            list[#list + 1] = component.proxy(addr)
+        end
+    end
+    return list
+end
+local function sortedIdx(t)
+    local idx = {}
+    for k in pairs(t or {}) do
+        idx[#idx + 1] = k
+    end
+    table.sort(idx)
+    return idx
+end
+local function entryLine(e)
+    local name = tostring(e.name or "?")
+    local parts = {}
+    if e.damage ~= nil then
+        parts[#parts + 1] = "damage=" .. tostring(e.damage)
+    end
+    if e.size ~= nil then
+        parts[#parts + 1] = "size=" .. tostring(e.size)
+    elseif e.amount ~= nil then
+        parts[#parts + 1] = "amount=" .. tostring(e.amount)
+    end
+    if e.label and e.label ~= "" then
+        parts[#parts + 1] = 'label="' .. tostring(e.label) .. '"'
+    end
+    if #parts == 0 then
+        return name
+    end
+    return name .. "  " .. table.concat(parts, "  ")
+end
+function M.run(ctx, args)
+    local ifaces = findIfaces()
+    if #ifaces == 0 then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "找不到ME接口", footer = "检查适配器是否紧贴方块",
+            })
+        else
+            ctx.write("找不到ME接口")
+        end
+        return false
+    end
+    local lines = {}
+    local rows = {}
+    local nPat, nIn, nOut = 0, 0, 0
+    lines[#lines + 1] = "# 样板导出 " .. os.date("%Y-%m-%d %H:%M:%S")
+    lines[#lines + 1] = "# 格式：[接口 槽] IN/OUT 序号  name  damage=..  size=..  label=.."
+    for ii, iface in ipairs(ifaces) do
+        for slot = 1, 36 do
+            local ok, p = pcall(iface.getInterfacePattern, slot)
+            if ok and p then
+                nPat = nPat + 1
+                local nI, nO = 0, 0
+                for _, idx in ipairs(sortedIdx(p.inputs)) do
+                    nI = nI + 1
+                    lines[#lines + 1] = string.format("[接口%d 槽%d] IN  %d  %s", ii, slot, idx, entryLine(p.inputs[idx]))
+                end
+                for _, idx in ipairs(sortedIdx(p.outputs)) do
+                    nO = nO + 1
+                    lines[#lines + 1] = string.format("[接口%d 槽%d] OUT %d  %s", ii, slot, idx, entryLine(p.outputs[idx]))
+                end
+                nIn = nIn + nI
+                nOut = nOut + nO
+                rows[#rows + 1] = string.format("接口%d 槽%d：%d 输入 / %d 输出", ii, slot, nI, nO)
+            end
+            os.sleep(0)
+        end
+        os.sleep(0)
+    end
+    if nPat == 0 then
+        local again = nil
+        if ctx.select then
+            again = ctx.select({
+                { label = "重试", desc = "重新扫描接口", value = 1 },
+                { label = "退出", desc = "回到主菜单", value = 2 },
+            }, {
+                title = "接口里没有样板", footer = "插好样板后点重试",
+            })
+        else
+            ctx.write("接口里没有样板")
+        end
+        if again == 1 then
+            return M.run(ctx, args)
+        end
+        return false
+    end
+    local path = "/home/pattern-dump.txt"
+    local f, err = io.open(path, "w")
+    if not f then
+        ctx.write("写文件失败：" .. tostring(err))
+        return false
+    end
+    f:write(table.concat(lines, "\n") .. "\n")
+    f:close()
+    ctx.clear()
+    ctx.write("样板导出")
+    ctx.write(string.rep("-", 50))
+    ctx.write(string.format("%d 个接口 / %d 个样板 / %d 输入 + %d 输出", #ifaces, nPat, nIn, nOut))
+    ctx.write("")
+    ctx.write("已写入 " .. path)
+    ctx.write("")
+    ctx.write("查看文件：edit " .. path)
+    ctx.write("拷到电脑：存档 opencomputers/<电脑ID>/home/pattern-dump.txt")
+    ctx.write("")
+    for i = 1, math.min(#rows, 8) do
+        ctx.write(rows[i])
+    end
+    if #rows > 8 then
+        ctx.write(string.format("……还有 %d 个，看文件", #rows - 8))
+    end
+    if ctx.select then
+        ctx.select({
+            { label = "文件：" .. path, desc = "edit 查看，或到存档 opencomputers/<电脑ID>/home 拷走", value = 1 },
+            { label = "好了", desc = "返回", value = 2 },
+        }, {
+            title = string.format("样板导出：%d 个样板，已写入 %s", nPat, path),
+            footer = "点「好了」返回",
+        })
+    end
+    return true
+end
+return M
+]====],
+    ["/home/tools/pattern-paste.lua"] = [====[
+local component = require("component")
+local term = require("term")
+local M = {
+    id = "pattern-paste",
+    name = "样板写入",
+    group = "AE2 样板",
+    order = 80,
+    desc = "粘贴样板导出文本\n自动写进接口对应槽位",
+}
+local function findIfaces()
+    local list = {}
+    for addr in component.list("fluid_interface") do
+        list[#list + 1] = component.proxy(addr)
+    end
+    if #list == 0 then
+        for addr in component.list("me_interface") do
+            list[#list + 1] = component.proxy(addr)
+        end
+    end
+    return list
+end
+local function splitName(rest)
+    local best = nil
+    for _, pat in ipairs({ " damage=", " size=", " amount=", " label=" }) do
+        local p = rest:find(pat, 1, true)
+        if p and (not best or p < best) then
+            best = p
+        end
+    end
+    if best then
+        local name = rest:sub(1, best - 1):gsub("^%s+", ""):gsub("%s+$", "")
+        return name, rest:sub(best + 1)
+    end
+    return rest:match("^(%S+)") or "", rest
+end
+local function parseLine(line)
+    local ifaceN, slot, dir, idx, rest = line:match("^%[接口(%d+) 槽(%d+)%]%s+(%a+)%s+(%d+)%s+(.+)$")
+    if not dir then
+        dir, idx, rest = line:match("^%s*(%a+)%s+(%d+)%s+(.+)$")
+        ifaceN, slot = 1, 1
+    end
+    if dir ~= "IN" and dir ~= "OUT" then
+        return nil
+    end
+    local e = {}
+    e.name, rest = splitName(rest)
+    if not e.name or e.name == "" then
+        return nil
+    end
+    e.damage = tonumber(rest:match("damage=([%-%d]+)")) or 0
+    e.size = tonumber(rest:match("size=([%-%d]+)"))
+        or tonumber(rest:match("amount=([%-%d]+)")) or 1
+    e.label = rest:match('label="([^"]*)"')
+    return tonumber(ifaceN) or 1, tonumber(slot) or 1, dir, tonumber(idx), e
+end
+local function parseText(text)
+    local patterns = {}
+    for line in text:gmatch("[^\r\n]+") do
+        local ifaceN, slot, dir, idx, e = parseLine(line)
+        if ifaceN and slot and idx then
+            local bySlot = patterns[ifaceN]
+            if not bySlot then
+                bySlot = {}
+                patterns[ifaceN] = bySlot
+            end
+            local p = bySlot[slot]
+            if not p then
+                p = { ins = {}, outs = {} }
+                bySlot[slot] = p
+            end
+            if dir == "IN" then
+                p.ins[idx] = e
+            else
+                p.outs[idx] = e
+            end
+        end
+    end
+    return patterns
+end
+local function markRenames(patterns, dbs)
+    if #dbs == 0 then return end
+    local db = dbs[1]
+    local defaultLabel = {}
+    local slot = 0
+    local function defaultOf(name, damage)
+        local key = tostring(name) .. "|" .. tostring(damage)
+        if defaultLabel[key] ~= nil then
+            return defaultLabel[key]
+        end
+        slot = slot % 64 + 1
+        local ok = pcall(db.set, slot, name, damage, "")
+        if not ok then
+            defaultLabel[key] = ""
+            return ""
+        end
+        local ok2, v = pcall(db.get, slot)
+        if not ok2 or type(v) ~= "table" then
+            defaultLabel[key] = ""
+            return ""
+        end
+        defaultLabel[key] = tostring(v.label or "")
+        return defaultLabel[key]
+    end
+    local function mark(list)
+        for _, e in pairs(list or {}) do
+            local def = defaultOf(e.name, e.damage)
+            e.rename = (def ~= "" and (e.label or "") ~= def)
+        end
+    end
+    for _, bySlot in pairs(patterns) do
+        for _, p in pairs(bySlot) do
+            mark(p.ins)
+            mark(p.outs)
+        end
+    end
+end
+local function findDbs()
+    local list = {}
+    for addr in component.list("database") do
+        list[#list + 1] = component.proxy(addr)
+    end
+    return list
+end
+local function say(ctx, title, footer)
+    if ctx.select then
+        ctx.select({ { label = "知道了", value = 1 } }, { title = title, footer = footer })
+    else
+        ctx.write(tostring(title))
+    end
+end
+local function readInput(ctx)
+    local h = ctx.height or 24
+    ctx.clear()
+    ctx.line(1, 1, "  样板写入：粘贴样板导出文本", "accent", "surface")
+    ctx.line(1, 2, "  粘贴完输入 END 回车（或空行回车）结束", "muted", "canvas")
+    ctx.line(1, 3, string.rep("-", 56), "border", "canvas")
+    local lines = {}
+    local y = 5
+    local maxY = h - 3
+    local function status()
+        ctx.line(1, h, "  已读 " .. #lines .. " 行，输入 END 回车结束", "muted", "canvas")
+    end
+    status()
+    while true do
+        if y > maxY then
+            ctx.clear()
+            ctx.line(1, 1, "  样板写入：已读 " .. #lines .. " 行", "accent", "surface")
+            ctx.line(1, 2, "  粘贴完输入 END 回车（或空行回车）结束", "muted", "canvas")
+            ctx.line(1, 3, string.rep("-", 56), "border", "canvas")
+            y = 5
+        end
+        term.setCursor(1, y)
+        term.write("> ")
+        local line = term.read()
+        if not line then
+            break
+        end
+        line = tostring(line):gsub("[\r\n]", "")
+        line = line:gsub("^%s+", ""):gsub("%s+$", "")
+        if line == "" then
+            break
+        end
+        if line:lower() == "end" then
+            break
+        end
+        lines[#lines + 1] = line
+        y = y + 1
+        status()
+        if #lines >= 300 then
+            break
+        end
+    end
+    return table.concat(lines, "\n")
+end
+function M.run(ctx, args)
+    local ifaces = findIfaces()
+    if #ifaces == 0 then
+        say(ctx, "找不到ME接口", "检查适配器是否紧贴方块")
+        return false
+    end
+    local text = readInput(ctx)
+    if text == "" then
+        say(ctx, "没有输入内容", "重新点工具，把样板导出文本粘进来")
+        return false
+    end
+    local patterns = parseText(text)
+    local nPat = 0
+    local maxIface = 0
+    for ifaceN, bySlot in pairs(patterns) do
+        for _ in pairs(bySlot) do nPat = nPat + 1 end
+        if ifaceN > maxIface then maxIface = ifaceN end
+    end
+    if nPat == 0 then
+        say(ctx, "没认出样板行",
+            "需要 IN/OUT 行，例如 [接口1 槽1] IN  1  name  damage=..  size=..")
+        return false
+    end
+    local dbs = findDbs()
+    markRenames(patterns, dbs)
+    ctx.clear()
+    ctx.write("样板写入")
+    ctx.write(string.rep("-", 56))
+    ctx.write(string.format("解析到 %d 个样板槽（最多接口 %d，检测到 %d 个接口）",
+        nPat, maxIface, #ifaces))
+    ctx.write("")
+    local nIn, nOut, nFail, nRename = 0, 0, 0, 0
+    local dbUse = 0
+    local function dbSlot(name, damage, label)
+        if #dbs == 0 then return nil end
+        dbUse = dbUse % 64 + 1
+        local db = dbs[(dbUse - 1) % #dbs + 1]
+        local ok = pcall(db.set, dbUse, name, damage, '{display:{Name:"' .. label .. '"}}')
+        if not ok then return nil end
+        return db.address, dbUse
+    end
+    local function writeOne(iface, slot, idx, e, isOut)
+        local via = e.name:find(":") and "item" or "fluid"
+        local fn = isOut and iface.setInterfacePatternOutput or iface.setInterfacePatternInput
+        local function call(...)
+            local ok, res = pcall(fn, ...)
+            if not ok then
+                return false
+            end
+            return res and true or false
+        end
+        if via == "fluid" then
+            return call(slot, idx,
+                { name = e.name, amount = e.size, size = e.size }, "fluid")
+        end
+        if e.rename then
+            local addr, ds = dbSlot(e.name, e.damage, e.label or "")
+            if addr then
+                nRename = nRename + 1
+                return call(slot, idx, addr, ds, e.size)
+            end
+        end
+        return call(slot, idx,
+            { name = e.name, damage = e.damage, size = e.size }, "item")
+    end
+    for ifaceN, bySlot in pairs(patterns) do
+        local iface = ifaces[ifaceN]
+        if not iface then
+            ctx.write(string.format("接口 %d 不存在（只检测到 %d 个），这一组跳过", ifaceN, #ifaces))
+            nFail = nFail + 1
+        else
+            for slot, p in pairs(bySlot) do
+                local oldIn, oldOut = {}, {}
+                local okp, p0 = pcall(iface.getInterfacePattern, slot)
+                if okp and type(p0) == "table" then
+                    for idx in pairs(p0.inputs or {}) do oldIn[idx] = true end
+                    for idx in pairs(p0.outputs or {}) do oldOut[idx] = true end
+                end
+                for idx, e in pairs(p.ins) do
+                    local okw = writeOne(iface, slot, idx, e, false)
+                    if okw then nIn = nIn + 1 else nFail = nFail + 1 end
+                end
+                for idx, e in pairs(p.outs) do
+                    local okw = writeOne(iface, slot, idx, e, true)
+                    if okw then nOut = nOut + 1 else nFail = nFail + 1 end
+                end
+                for idx in pairs(oldIn) do
+                    if not p.ins[idx] then
+                        pcall(iface.clearInterfacePatternInput, slot, idx)
+                    end
+                end
+                for idx in pairs(oldOut) do
+                    if not p.outs[idx] then
+                        pcall(iface.clearInterfacePatternOutput, slot, idx)
+                    end
+                end
+                ctx.write(string.format("接口 %d 槽 %d：IN %d / OUT %d", ifaceN, slot, nIn, nOut))
+                os.sleep(0)
+            end
+        end
+    end
+    ctx.write(string.rep("-", 56))
+    ctx.write(string.format("完成：IN %d / OUT %d / 重命名 %d / 失败 %d", nIn, nOut, nRename, nFail))
+    if ctx.select then
+        local again = ctx.select({
+            { label = "继续", desc = "重新输入再写一遍", value = 1 },
+            { label = "好了", desc = "返回", value = 2 },
+        }, {
+            title = string.format("样板写入：IN %d / OUT %d / 重命名 %d / 失败 %d",
+                nIn, nOut, nRename, nFail),
+            footer = "重命名靠数据库识别（没装数据库会丢失重命名）",
+        })
+        if again == 1 then
+            return M.run(ctx, args)
+        end
+    end
+    return nFail == 0
+end
+return M
+]====],
+    ["/home/tools/foil-input.lua"] = [====[
+local component = require("component")
+local M = {
+    id = "foil-input",
+    name = "箔输入锭改板",
+    group = "AE2 样板",
+    order = 60,
+    desc = "箔样板输入里的锭改成板\n1 锭 = 1 板，数量不变",
+}
+local function findIfaces()
+    local list = {}
+    for addr in component.list("fluid_interface") do
+        list[#list + 1] = component.proxy(addr)
+    end
+    if #list == 0 then
+        for addr in component.list("me_interface") do
+            list[#list + 1] = component.proxy(addr)
+        end
+    end
+    return list
+end
+local function endsWith(s, suffix)
+    s = tostring(s or "")
+    return #s >= #suffix and s:sub(-#suffix) == suffix
+end
+local function labelOf(e)
+    return tostring(e.label or "")
+end
+local function listPatterns(iface)
+    local out = {}
+    for slot = 1, 36 do
+        local ok, p = pcall(iface.getInterfacePattern, slot)
+        if ok and p then
+            out[#out + 1] = { slot = slot, pat = p, iface = iface }
+        end
+        os.sleep(0)
+    end
+    return out
+end
+local function learnPlates(patterns)
+    local plates = {}
+    local function scan(list)
+        for _, e in pairs(list or {}) do
+            local lb = labelOf(e)
+            if endsWith(lb, "板") then
+                local mat = lb:sub(1, #lb - #"板")
+                if mat ~= "" and not plates[mat] then
+                    plates[mat] = { name = e.name, damage = tonumber(e.damage) or 0 }
+                end
+            end
+        end
+    end
+    for _, item in ipairs(patterns) do
+        scan(item.pat.inputs)
+        scan(item.pat.outputs)
+    end
+    return plates
+end
+local function guessPlate(e)
+    local name = tostring(e.name or "")
+    local dmg = tonumber(e.damage) or 0
+    local plateName = name:gsub("[Ii]ngot", "plate")
+    if plateName ~= name then
+        return { name = plateName, damage = dmg }
+    end
+    if name == "gregtech:gt.metaitem.01" and dmg >= 11000 and dmg < 12000 then
+        return { name = name, damage = dmg + 6000 }
+    end
+    if dmg >= 11000 and dmg < 12000 then
+        return { name = name, damage = dmg + 6000 }
+    end
+    return nil
+end
+function M.run(ctx, args)
+    local ifaces = findIfaces()
+    if #ifaces == 0 then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "找不到ME接口", footer = "检查适配器是否紧贴方块",
+            })
+        else
+            ctx.write("找不到ME接口")
+        end
+        return false
+    end
+    local all = {}
+    for _, iface in ipairs(ifaces) do
+        for _, item in ipairs(listPatterns(iface)) do
+            all[#all + 1] = item
+        end
+        os.sleep(0)
+    end
+    if #all == 0 then
+        if ctx.select then
+            ctx.select({ { label = "知道了", value = 1 } }, {
+                title = "接口里没有样板", footer = "先把样板插进接口",
+            })
+        end
+        return false
+    end
+    local plates = learnPlates(all)
+    ctx.clear()
+    ctx.write("箔输入锭改板：扫描全部样板")
+    ctx.write(string.rep("-", 56))
+    ctx.write(string.format("共 %d 个样板，学到 %d 种板", #all, (function()
+        local n = 0
+        for _ in pairs(plates) do n = n + 1 end
+        return n
+    end)()))
+    ctx.write("")
+    local nDone, nSkip, nFail = 0, 0, 0
+    local problems = {}
+    for _, item in ipairs(all) do
+        local pat = item.pat
+        local hasFoil = false
+        for _, e in pairs(pat.outputs or {}) do
+            if endsWith(labelOf(e), "箔") then
+                hasFoil = true
+                break
+            end
+        end
+        if hasFoil then
+            local changed = 0
+            for idx, e in pairs(pat.inputs or {}) do
+                local lb = labelOf(e)
+                if endsWith(lb, "锭") then
+                    local mat = lb:sub(1, #lb - #"锭")
+                    local plate = plates[mat] or guessPlate(e)
+                    if plate then
+                        local ok, err = pcall(item.iface.setInterfacePatternInput, item.slot, idx,
+                            { name = plate.name, damage = plate.damage, size = e.size }, "item")
+                        if ok then
+                            changed = changed + 1
+                            ctx.write(string.format("槽 %d: %s → %s（第 %d 项）",
+                                item.slot, tostring(e.label), tostring(plate.name), idx))
+                        else
+                            nFail = nFail + 1
+                            problems[#problems + 1] = string.format("槽 %d 写失败：%s", item.slot, tostring(err))
+                        end
+                    else
+                        problems[#problems + 1] = string.format("槽 %d 认不出「%s」对应的板", item.slot, mat)
+                    end
+                end
+            end
+            if changed > 0 then
+                nDone = nDone + 1
+            else
+                nSkip = nSkip + 1
+            end
+        end
+        os.sleep(0)
+    end
+    ctx.write(string.rep("-", 56))
+    ctx.write(string.format("完成：改 %d 个样板 / 跳过 %d / 失败 %d", nDone, nSkip, nFail))
+    if ctx.select then
+        local items = {}
+        for _, msg in ipairs(problems) do
+            items[#items + 1] = { label = msg, desc = "没改的原因", value = 0 }
+        end
+        items[#items + 1] = { label = "继续", desc = "重新扫描再跑一遍", value = 1 }
+        items[#items + 1] = { label = "好了", desc = "返回", value = 2 }
+        local again = ctx.select(items, {
+            title = string.format("箔输入锭改板：改 %d / 跳过 %d / 失败 %d", nDone, nSkip, nFail),
+            footer = "只处理输出含「箔」的样板",
+        })
+        if again == 1 then
+            return M.run(ctx, args)
+        end
+    end
+    return nFail == 0
 end
 return M
 ]====],
@@ -2066,6 +3012,19 @@ local function bootstrapTools()
     if not fs.isDirectory(TOOL_DIR) then
         pcall(function() fs.makeDirectory(TOOL_DIR) end)
     end
+    if fs.isDirectory(TOOL_DIR) then
+        local okL, names = pcall(function() return fs.list(TOOL_DIR) end)
+        if okL and type(names) == "table" then
+            for _, nm in ipairs(names) do
+                if type(nm) == "string" and nm:sub(-4) == ".lua" then
+                    local oldPath = TOOL_DIR .. "/" .. nm
+                    if not EMBEDDED[oldPath] then
+                        pcall(function() fs.remove(oldPath) end)
+                    end
+                end
+            end
+        end
+    end
     local n = 0
     for path, body in pairs(EMBEDDED) do
         local ok, f = pcall(io.open, path, "w")
@@ -2126,6 +3085,13 @@ local function put(x, y, text, fgRole, bgRole)
     useBg(bgRole or "canvas")
     term.write(fit(text, W - x + 1))
 end
+local function rule(y)
+    if y < 1 or y > H then return end
+    term.setCursor(1, y)
+    useFg("border")
+    useBg("canvas")
+    term.write(string.rep("─", W))
+end
 local function hook(x, y, text, action)
     HITS[#HITS + 1] = { x1 = x, x2 = x + ulen(text) - 1, y = y, action = action }
 end
@@ -2184,14 +3150,22 @@ local function makeCtx(opts)
         local foot = o.footer or "点一下选中   ↑↓ 移动   Enter 确定   Q 返回（别按 Esc，那是游戏菜单）"
         local top = o.top or 3
         local bottom = H - 2
+        local perPage = math.max(1, math.floor((bottom - top + 1) / 2))
         while true do
             if ctx then ctx.hadSelect = true end
             resetScreen()
             put(1, 1, "  " .. head, "accent", "surface")
             put(1, 2, string.rep("-", W), "border", "canvas")
+            local startIdx = 1
+            if #items > perPage then
+                startIdx = sel - math.floor(perPage / 2)
+                if startIdx < 1 then startIdx = 1 end
+                if startIdx > #items - perPage + 1 then startIdx = #items - perPage + 1 end
+            end
+            local lastIdx = math.min(#items, startIdx + perPage - 1)
             local y = top
-            for i2, it in ipairs(items) do
-                if y + 1 > bottom then break end
+            for i2 = startIdx, lastIdx do
+                local it = items[i2]
                 local isSel = (i2 == sel)
                 local bg = isSel and "selected" or "canvas"
                 term.setCursor(1, y)
@@ -2220,7 +3194,11 @@ local function makeCtx(opts)
             put(1, H, btxt, "muted", "surface")
             HITS[#HITS + 1] = { x1 = 1, x2 = ulen(btxt), y1 = H, y2 = H,
                                 action = { kind = "back" } }
-            put(ulen(btxt) + 2, H, foot, "muted", "canvas")
+            local foot2 = foot
+            if #items > perPage then
+                foot2 = string.format("[%d-%d/%d] ", startIdx, lastIdx, #items) .. foot
+            end
+            put(ulen(btxt) + 2, H, foot2, "muted", "canvas")
             term.setCursor(1, H)
             local ev, a, b = waitInput()
             if ev == "touch" then
@@ -2320,7 +3298,7 @@ local function doConfirm(question, yesHint, noHint)
             resetScreen()
             HITS = {}
             put(1, 1, "  " .. head, "accent", "surface")
-            put(1, 2, string.rep("─", W), "border", "canvas")
+            rule(2)
             for i, it in ipairs(items) do
                 local y = 4 + (i - 1) * (ch + 1)
                 if y + ch - 1 <= H - 2 then
@@ -2332,7 +3310,7 @@ local function doConfirm(question, yesHint, noHint)
                     }
                 end
             end
-            put(1, H - 1, string.rep("─", W), "border", "canvas")
+            rule(H - 1)
             local btxt = "[ 返回 ]"
             put(1, H, btxt, "muted", "surface")
             HITS[#HITS + 1] = { x1 = 1, x2 = ulen(btxt), y1 = H, y2 = H, action = { kind = "back" } }
@@ -2379,9 +3357,17 @@ local function doConfirm(question, yesHint, noHint)
             term.write(fit(s2, W))
         end,
         ask = function(prompt, default)
-            if prompt then term.write(fit(prompt, W)) end
+            if prompt then
+                term.setCursor(1, 2)
+                useBg("canvas")
+                pcall(function() term.clearLine() end)
+                useFg("accent")
+                term.write(fit(prompt, W))
+            end
             local ok, line2 = pcall(function() return term.read() end)
-            if not ok or line2 == nil or line2 == "" then return default end
+            if not ok or line2 == nil then return default end
+            line2 = tostring(line2):gsub("[\r\n]+$", "")
+            if line2 == "" then return default end
             return line2
         end,
         pause = function(msg)
@@ -2409,6 +3395,65 @@ local function doConfirm(question, yesHint, noHint)
 end
 local COLS = 2
 local CARD_H = 5
+local UPDATE_URL = "https://gist.githubusercontent.com/kAGuyAk/45f36eeca31fb2fc536a000d5d9d3a80/raw/gistfile1.txt"
+local function doUpdate()
+    local addr
+    for a in component.list("internet") do
+        addr = a
+        break
+    end
+    if not addr then
+        return nil, "需要因特网卡"
+    end
+    local net = component.proxy(addr)
+    local ok, data = pcall(function()
+        local url = UPDATE_URL .. "?_=" .. tostring(os.time())
+        local handle = net.request(url)
+        if not handle then return nil end
+        local chunks = {}
+        while true do
+            local chunk = handle.read(8192)
+            if not chunk then break end
+            chunks[#chunks + 1] = chunk
+        end
+        pcall(function() handle.close() end)
+        return table.concat(chunks)
+    end)
+    if not ok or type(data) ~= "string" or #data < 10000 then
+        return nil, "下载失败（检查网络）"
+    end
+    local newVer = data:match('local VERSION = "([^"]+)"')
+    if not newVer then
+        return nil, "下载内容不是工具箱"
+    end
+    if newVer == VERSION then
+        return newVer, "已是最新"
+    end
+    local path = "/home/toolbox"
+    local tmp = path .. ".new"
+    local f = io.open(tmp, "w")
+    if not f then
+        return nil, "写文件失败"
+    end
+    f:write(data)
+    f:close()
+    local rf = io.open(tmp, "r")
+    if not rf then
+        return nil, "写文件失败"
+    end
+    local check = rf:read(200)
+    rf:close()
+    if not check or not check:find("local VERSION") then
+        os.remove(tmp)
+        return nil, "写入校验失败"
+    end
+    os.remove(path)
+    local rok = os.rename(tmp, path)
+    if not rok then
+        return nil, "替换失败"
+    end
+    return newVer, nil
+end
 local function drawMenu(tools, bad, sel, scroll, status)
     term.setCursorBlink(false)
     HITS = {}
@@ -2418,8 +3463,13 @@ local function drawMenu(tools, bad, sel, scroll, status)
     local total = tostring(#tools) .. " 个工具"
     put(1, 1, "  工具箱", "accent", "canvas")
     put(1 + ulen("  工具箱") + 1, 1, "v" .. VERSION, "muted", "canvas")
+    local uptxt = "[更新]"
+    local upx = W - ulen(total) - ulen(uptxt) - 2
+    put(upx, 1, uptxt, "accent", "surface")
+    HITS[#HITS + 1] = { x1 = upx, x2 = upx + ulen(uptxt) - 1, y1 = 1, y2 = 1,
+                        action = { kind = "update" } }
     put(W - ulen(total), 1, total, "muted", "canvas")
-    put(1, 2, string.rep("─", W), "border", "canvas")
+    rule(2)
     local top = 4
     local bottom = H - 3
     local gapX = 2
@@ -2454,11 +3504,11 @@ local function drawMenu(tools, bad, sel, scroll, status)
     elseif status and status ~= "" then
         put(1, H - 2, "  " .. status, "warn", "canvas")
     else
-        put(1, H - 2, string.rep("─", W), "border", "canvas")
+        rule(H - 2)
     end
     local bx = 1
     local function button(label, act, fgRole)
-        local txt = "[ " .. label .. " ]"
+        local txt = "[" .. label .. "]"
         put(bx, H - 1, txt, fgRole or "accent", "surface")
         HITS[#HITS + 1] = { x1 = bx, x2 = bx + ulen(txt) - 1, y1 = H - 1, y2 = H - 1, action = act }
         bx = bx + ulen(txt) + 1
@@ -2466,7 +3516,13 @@ local function drawMenu(tools, bad, sel, scroll, status)
     button("运行", { kind = "run" })
     button("重扫", { kind = "rescan" })
     button("退出", { kind = "quit" }, "muted")
-    put(bx + 1, H - 1, "↑↓←→ 选择   回车运行   也可直接点卡片", "muted", "canvas")
+    local author = "作者：柳叶刀kk，任何反馈或期望的功能可在NH社区群at哈基米"
+    local aw = ulen(author)
+    if aw > W - 1 then
+        author = fit(author, W - 1)
+        aw = ulen(author)
+    end
+    put(W - aw + 1, H - 1, author, "muted", "canvas")
     term.setCursor(1, H - 1)
 end
 local function menuHeight(tools)
@@ -2529,6 +3585,17 @@ local function runMenu(tools, bad)
                     tools, bad = loadTools()
                     if sel > #tools then sel = math.max(1, #tools) end
                     status = string.format("已重扫：%d 个工具", #tools)
+                elseif act.kind == "update" then
+                    local ver, msg = doUpdate()
+                    if ver then
+                        if msg == "已是最新" then
+                            status = "已是最新：" .. ver
+                        else
+                            status = "已更新到 " .. ver .. "，输入 toolbox 重新运行"
+                        end
+                    else
+                        status = "更新失败：" .. tostring(msg)
+                    end
                 elseif act.kind == "quit" then
                     term.clear()
                     term.setCursor(1, 1)
