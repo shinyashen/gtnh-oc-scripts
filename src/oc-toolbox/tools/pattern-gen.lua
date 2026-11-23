@@ -127,9 +127,11 @@ end
 -- ==== 通道样板部分结束 ====
 
 -- ==== 框架切割液选择 ====
--- NAC 切割仓(纳米精度切割仓)的框架切割配方各有两种可选切割液(中文维基在线 NEI 数据库实测,
--- 共 29 条切割配方; wiki 旧方案只写了其中一种)。RECIPES 数据里写死的是默认项(opts[1]),
+-- NAC 切割仓(纳米精度切割仓)的框架切割配方各有可选切割液(2.9 起数据;中文维基在线 NEI 数据库实测,
+-- wiki 旧方案只写了其中一种)。RECIPES 数据里写死的是默认项(opts[1]),
 -- 用户选择另一项时按 每框架用量 x 框架数 替换对应切割液流体。
+-- 2.9.1 起磁物质框架的八级净化水 500L 配方已删除(CoreMod PR #2044),只剩超流体一条路线,
+-- 只有一项的框架不再询问,直接按 RECIPES 写死的默认项写。
 local FRAME_CUTTING_FLUIDS = {
     ["miscutils:blockFrameGtCelestialTungsten"] = {
         { name = "grade6purifiedwater", label = "紫外辐照水（六级净化水）", perFrame = 250 },
@@ -140,7 +142,6 @@ local FRAME_CUTTING_FLUIDS = {
         { name = "grade8purifiedwater", label = "理想微粒水（八级净化水）", perFrame = 250 },
     },
     ["miscutils:blockFrameGtMagmatter"] = {
-        { name = "grade8purifiedwater", label = "理想微粒水（八级净化水）", perFrame = 500 },
         { name = "dimensionallyshiftedsuperfluid", label = "维度偏移超流体", perFrame = 100 },
     },
 }
@@ -164,7 +165,7 @@ local function askCuttingFluid(ctx, w, frameName, opts, frameCount)
         })
     end
     for i, it in ipairs(items) do
-        ctx.write(string.format("  %d. %s（%dL x %d）", i, it.label, it.perFrame, frameCount))
+        ctx.write(string.format("  %d. %s（%dL x %d）", i, it.label, it.value.perFrame, frameCount))
     end
     local ans = ctx.ask("切割液选哪个（数字，回车=默认）> ", "1")
     local n = tonumber(ans or "")
@@ -183,7 +184,8 @@ local function applyCuttingFluidChoice(list, ctx)
         end
         for fname, count in pairs(frameCount) do
             local opts = FRAME_CUTTING_FLUIDS[fname]
-            local pick = askCuttingFluid(ctx, w, fname, opts, count)
+            -- 只剩一条路线的框架没有选择可言(2.9.1 起磁物质框架),直接保持默认
+            local pick = #opts > 1 and askCuttingFluid(ctx, w, fname, opts, count) or nil
             if pick and pick.name ~= opts[1].name then
                 local kept = {}
                 for _, e in ipairs(w.ins) do
